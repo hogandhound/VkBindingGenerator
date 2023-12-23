@@ -1,0 +1,22 @@
+{
+  "name": "vktest",
+  "includes": [ "MyStructures.h", "VkTexture.h" ],
+  "shaders": [
+  {
+   "name": "Texture",
+   "vert": {
+     "name": "texture.vert",
+     "inputs": {
+     "vert": {
+       "binding": "0",
+       "offset": "offsetof(Vertex, pos)",
+       "stride": "sizeof(Vertex)"
+     }
+     }
+   },
+   "frag": {
+     "name": "texture.frag"
+   }
+  }
+  ]
+}
