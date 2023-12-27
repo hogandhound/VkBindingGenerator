@@ -86,7 +86,19 @@ struct ShaderDef
 	std::string name;
 	ShaderVertDef vert;
 	ShaderFragDef frag;
+	std::string push;
 };
+struct ShaderStructPart
+{
+   Binding::BindingEnum type;
+   std::string name;
+};
+struct ShaderStruct
+{
+   std::string name;
+   std::vector<ShaderStructPart> parts;
+};
+
 template<class T>
 struct StagesDef
 {
@@ -99,10 +111,86 @@ struct ShaderProcess
 	std::string name;
 	std::vector<std::string> includes;
 	std::vector<ShaderDef> shaders;
+	std::unordered_map<std::string, ShaderStruct> structs;
 };
 
-void ReadVertJson(std::string file, ShaderVertDef& vert)
+std::unordered_map<std::string, std::string> ParseStruct(ryml::Tree& doc, ShaderProcess& process)
 {
+	std::unordered_map<std::string, std::string> fileMapping;
+	if (doc.has_child(doc.root_id(), "types"))
+	{
+		for (const auto& type : doc["types"].children())
+		{
+			std::string name, key;
+			key = std::string(type.key().str, type.key().len);
+			type["name"] >> name;
+			if (name.compare("gl_PerVertex") == 0)
+				continue;
+
+			fileMapping[key] = name;
+			if (process.structs.find(name) == process.structs.end())
+			{
+				ShaderStruct strct = {};
+				strct.name = name;
+				for (const auto& mem : type["members"])
+				{
+					ShaderStructPart part = {};
+					mem["name"] >> part.name;
+					if (mem["type"] == "float")
+					{
+						part.type = Binding::FLOAT;
+					}
+					else if (mem["type"] == "vec2")
+					{
+						part.type = Binding::VEC2;
+					}
+					else if (mem["type"] == "vec3")
+					{
+						part.type = Binding::VEC3;
+					}
+					else if (mem["type"] == "vec4")
+					{
+						part.type = Binding::VEC4;
+					}
+					else if (mem["type"] == "mat2")
+					{
+						part.type = Binding::MAT2;
+					}
+					else if (mem["type"] == "mat3")
+					{
+						part.type = Binding::MAT3;
+					}
+					else if (mem["type"] == "mat4")
+					{
+						part.type = Binding::MAT4;
+					}
+					else if (mem["type"] == "int")
+					{
+						part.type = Binding::INT;
+					}
+					else if (mem["type"] == "ivec2")
+					{
+						part.type = Binding::IVEC2;
+					}
+					else if (mem["type"] == "ivec3")
+					{
+						part.type = Binding::IVEC3;
+					}
+					else if (mem["type"] == "ivec4")
+					{
+						part.type = Binding::IVEC4;
+					}
+					strct.parts.push_back(part);
+				}
+				process.structs[name] = strct;
+			}
+		}
+	}
+	return fileMapping;
+}
+void ReadVertJson(std::string file, ShaderProcess& process, ShaderDef& shader)
+{
+	ShaderVertDef& vert = shader.vert;
 	std::vector<char> fileBuf;
 
 	FILE* f = 0;
@@ -115,6 +203,7 @@ void ReadVertJson(std::string file, ShaderVertDef& vert)
 	fclose(f);
 
 	auto doc = ryml::parse_in_arena(ryml::to_csubstr(fileBuf));
+	std::unordered_map<std::string, std::string> structMap = ParseStruct(doc, process);
 	for (const auto& yinput : doc["inputs"])
 	{
 		BindingDef input = {};
@@ -204,9 +293,16 @@ void ReadVertJson(std::string file, ShaderVertDef& vert)
 			vert.texs.push_back(input);
 		}
 	}
+	if (doc.has_child(doc.root_id(), "push_constants"))
+	{
+		std::string id;
+		doc["push_constants"][0]["type"] >> id;
+		shader.push = structMap[id];
+	}
 }
-void ReadFragJson(std::string file, ShaderFragDef& frag)
+void ReadFragJson(std::string file, ShaderProcess& process, ShaderDef& shader)
 {
+	ShaderFragDef& frag = shader.frag;
 	std::vector<char> fileBuf;
 
 	FILE* f = 0;
@@ -219,6 +315,8 @@ void ReadFragJson(std::string file, ShaderFragDef& frag)
 	fclose(f);
 
 	auto doc = ryml::parse_in_arena(ryml::to_csubstr(fileBuf));
+	std::unordered_map<std::string, std::string> structMap = ParseStruct(doc, process);
+
 
 	if (doc.has_child(doc.root_id(), "ubos"))
 	{
@@ -243,6 +341,12 @@ void ReadFragJson(std::string file, ShaderFragDef& frag)
 			ytex["set"] >> input.set;
 			frag.texs.push_back(input);
 		}
+	}
+	if (doc.has_child(doc.root_id(), "push_constants"))
+	{
+		std::string id;
+		doc["push_constants"][0]["type"] >> id;
+		shader.push = structMap[id];
 	}
 }
 
@@ -379,7 +483,7 @@ void OutputShaderImpl(ShaderProcess& process)
 			out += "        bindings" + indexStr + ".descriptorCount = 1;\n";
 			out += "        bindings" + indexStr + ".descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;\n";
 			out += "        bindings" + indexStr + ".pImmutableSamplers = nullptr;\n";
-			out += "        bindings" + indexStr + ".stageFlags = " + texs[i].stages + ";\n";
+			out += "        bindings" + indexStr + ".stageFlags = " + ubos[i].stages + ";\n";
 			out += "    }\n";
 		}
 		std::string dstype = "";
@@ -498,6 +602,42 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
 		out += "    " + process.name + "_Create" + p.name + "Pipeline(target, col.pipelines[PIPELINE_" + process.name + "_" + p.name + "]);\n";
 	}
 	out += "}\n";
+	
+			//Draw Command
+		out += R"(
+
+void )" + process.name + "_Draw" + p.name + R"((VKPipelineData* pipeline, VkCommandBuffer command, VkBuffer vertexBuffer, VkBuffer indexBuffer, std::vector<VkDescriptorSet>& sets)";
+		if (!shader.push.empty())
+		{
+			out += ", " + shader.push + "* push";
+		}
+		out+= std::string(")") + R"(
+{
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->graphicsPipeline);
+
+    VkBuffer vertexBuffers[] = { vertexBuffer };
+    VkDeviceSize offsets[] = { 0 };
+)";
+		if (!shader.push.empty())
+		{
+			out += R"(    vkCmdPushConstants(
+        command,
+        pipeline->pipelineLayout,
+        VK_SHADER_STAGE_VERTEX_BIT,
+        0,
+        sizeof()"+shader.push+")" + R"(,
+        push);
+)";
+		}
+out += R"(
+    vkCmdBindVertexBuffers(command, 0, 1, vertexBuffers, offsets);
+
+    vkCmdBindIndexBuffer(command, indexBuffer, 0, VK_INDEX_TYPE_UINT16);
+
+    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipelineLayout, 0, sets.size(), sets.data(), 0, nullptr);
+
+    vkCmdDrawIndexed(command, 6, 1, 0, 0, 0);
+})";
 	//OutputDebugStringA(out.c_str());
 	FILE* f = 0;
 	std::string filename = process.name + "_shaderdef.cpp";
@@ -601,10 +741,10 @@ void DumpShader(ShaderProcess& process)
 	fclose(f);
 }
 
-void Shader2Header()
+void Shader2Header(std::string baseFolder)
 {
+	//std::string baseFolder = "shaders\\";
 	std::string path = "shaders\\compileinfo.json";
-	std::string baseFolder = "shaders\\";
 
 	ShaderProcess process = {};
 
@@ -652,7 +792,7 @@ void Shader2Header()
 			std::string vertFile;
 			yshader["vert"]["name"] >> vertFile;
 			def.vert.name = vertFile;
-			ReadVertJson(baseFolder + vertFile, def.vert);
+			ReadVertJson(baseFolder + vertFile, process, def);
 			auto inputs = yshader["vert"]["inputs"];
 			for (const auto& yvert : yshader["vert"]["inputs"].cchildren())
 			{
@@ -682,7 +822,7 @@ void Shader2Header()
 			std::string fragFile;
 			yshader["frag"]["name"] >> fragFile;
 			def.frag.name = fragFile;
-			ReadFragJson(baseFolder + fragFile, def.frag);
+			ReadFragJson(baseFolder + fragFile, process, def);
 		}
 		process.shaders.push_back(def);
 	}
