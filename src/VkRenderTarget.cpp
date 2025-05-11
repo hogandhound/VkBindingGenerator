@@ -195,16 +195,20 @@ VkDescriptorSet VkRenderTarget::getDescSet(VkDescFormat fmt, uint32_t subIndex, 
 	auto& sub = descSets.subs[fmt][subIndex];
 	if (sub.start >= sub.sets[currentFrame].size())
 	{
+		sub.sets[currentFrame].resize(sub.start + 128);
+	}
+	if (sub.sets[currentFrame][sub.start] == 0)
+	{
 		VkDescriptorSetAllocateInfo allocInfo = {};
 		allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
 		allocInfo.descriptorPool = descPools[fmt];
 		allocInfo.descriptorSetCount = 1;
 		allocInfo.pSetLayouts = layout;
-		sub.sets[currentFrame].resize(sub.start + 128);
 		if (vkAllocateDescriptorSets(device, &allocInfo, &sub.sets[currentFrame][sub.start]) != VK_SUCCESS) {
 			throw std::runtime_error("failed to allocate descriptor sets!");
 		}
 	}
+	return sub.sets[currentFrame][sub.start++];
 }
 
 uint32_t VkRenderTarget::getDescSetSubIndex(VkDescFormat fmt, VkDescriptorSetLayoutBinding* bindings, int bCount)
@@ -236,7 +240,7 @@ uint32_t VkRenderTarget::getDescSetSubIndex(VkDescFormat fmt, VkDescriptorSetLay
 	toadd.defs.resize(bCount);
 	memcpy(toadd.defs.data(), bindings, bCount * sizeof(VkDescriptorSetLayoutBinding));
 	subs.push_back(toadd);
-	return subs.size() - 1;
+	return (uint32_t)subs.size() - 1;
 }
 
 void VkRenderTarget::RecreateSwapChain() {

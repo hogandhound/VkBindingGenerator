@@ -14,6 +14,7 @@ public:
     VkTexture();
 
     void CreateImage(VkRenderTarget* target, uint32_t width, uint32_t height, uint32_t* rgba);
+    void CreateImage(VkRenderTarget* target, uint32_t width, uint32_t height, uint8_t* rgba, VkFormat format);
 
 private:
     void createTextureSampler(VkRenderTarget* target);

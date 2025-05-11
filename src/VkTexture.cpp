@@ -51,7 +51,17 @@ VkTexture::VkTexture()
 
 void VkTexture::CreateImage(VkRenderTarget* target, uint32_t width, uint32_t height, uint32_t* rgba)
 {
-    const VkDeviceSize imageSize = width * height * 4;
+    CreateImage(target, width, height, (uint8_t*)rgba, VK_FORMAT_R8G8B8A8_UNORM);
+}
+
+void VkTexture::CreateImage(VkRenderTarget* target, uint32_t width, uint32_t height, uint8_t* rgba, VkFormat format)
+{
+    VkDeviceSize imageSize; 
+    switch (format)
+    {
+    case VK_FORMAT_R8G8B8A8_UNORM: imageSize = width * height * 4; break;
+    case VK_FORMAT_R8G8B8_UNORM:imageSize = width * height * 4; break;
+    }
 
     VkBufferCreateInfo stagingBufInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
     stagingBufInfo.size = imageSize;
@@ -67,26 +77,22 @@ void VkTexture::CreateImage(VkRenderTarget* target, uint32_t width, uint32_t hei
     vmaCreateBuffer(target->allocator, &stagingBufInfo, &stagingBufAllocCreateInfo, &stagingBuf, &stagingBufAlloc, &stagingBufAllocInfo);
 
     char* const pImageData = (char*)stagingBufAllocInfo.pMappedData;
-    memcpy(pImageData, rgba, width * height * 4);
-    //uint8_t* pRowData = (uint8_t*)pImageData;
-    //for (uint32_t y = 0; y < height; ++y)
-    //{
-    //    uint32_t* pPixelData = (uint32_t*)pRowData;
-    //    for (uint32_t x = 0; x < width; ++x)
-    //    {
-    //        *pPixelData =
-    //            ((x & 0x18) == 0x08 ? 0x000000FF : 0x00000000) |
-    //            ((x & 0x18) == 0x10 ? 0x0000FFFF : 0x00000000) |
-    //            ((y & 0x18) == 0x08 ? 0x0000FF00 : 0x00000000) |
-    //            ((y & 0x18) == 0x10 ? 0x00FF0000 : 0x00000000);
-    //        ++pPixelData;
-    //    }
-    //    pRowData += width * 4;
-    //}
-
-    // No need to flush stagingImage memory because CPU_ONLY memory is always HOST_COHERENT.
-
-    // Create g_hTextureImage in GPU memory.
+    switch (format)
+    {
+    case VK_FORMAT_R8G8B8A8_UNORM: memcpy(pImageData, rgba, imageSize); break;
+    case VK_FORMAT_R8G8B8_UNORM:
+    {
+        for (int i = 0; i < width * height; ++i)
+        {
+            pImageData[i * 4 + 0] = rgba[i * 3 + 0];
+            pImageData[i * 4 + 1] = rgba[i * 3 + 1];
+            pImageData[i * 4 + 2] = rgba[i * 3 + 2];
+            pImageData[i * 4 + 3] = 255;
+        }
+        format = VK_FORMAT_R8G8B8A8_UNORM;
+        break;
+    }
+    }
 
     VkImageCreateInfo imageInfo = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -95,7 +101,7 @@ void VkTexture::CreateImage(VkRenderTarget* target, uint32_t width, uint32_t hei
     imageInfo.extent.depth = 1;
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = 1;
-    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.format = format;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -168,7 +174,7 @@ void VkTexture::CreateImage(VkRenderTarget* target, uint32_t width, uint32_t hei
     VkImageViewCreateInfo textureImageViewInfo = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     textureImageViewInfo.image = image;
     textureImageViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    textureImageViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    textureImageViewInfo.format = format;
     textureImageViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     textureImageViewInfo.subresourceRange.baseMipLevel = 0;
     textureImageViewInfo.subresourceRange.levelCount = 1;
