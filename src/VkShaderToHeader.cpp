@@ -921,6 +921,7 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
 
 void HandleUBOOffset(std::string& output, int& currentOffset, int newOffset, int& dummyCount)
 {
+    newOffset = newOffset & 0x3;
     if (currentOffset + newOffset <= 4)
     {
         currentOffset += newOffset;
@@ -935,7 +936,7 @@ void HandleUBOOffset(std::string& output, int& currentOffset, int newOffset, int
         currentOffset = 0;
 }
 
-void DumpShader(ShaderProcess& process, std::string baseFolder)
+void OutputShaderHeader(ShaderProcess& process, std::string baseFolder)
 {
     //std::string baseFolder = "shaders\\";
     std::unordered_map<std::string, bool> dumped;
@@ -970,25 +971,25 @@ class VkTexture;)";
             switch (p.type)
             {
             case Binding::FLOAT:
-                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    float " + p.name + arr + "[1];"; break;
+                HandleUBOOffset(output, currOffset, 1 * p.count, dummyCount); output += "    float " + p.name + arr + "[1];"; break;
             case Binding::VEC2:
-                HandleUBOOffset(output, currOffset, 2, dummyCount); output += "    float " + p.name + arr + "[2];"; break;
+                HandleUBOOffset(output, currOffset, 2 * p.count, dummyCount); output += "    float " + p.name + arr + "[2];"; break;
             case Binding::VEC3:
-                HandleUBOOffset(output, currOffset, 3, dummyCount); output += "    float " + p.name + arr + "[3];"; break;
+                HandleUBOOffset(output, currOffset, 3 * p.count, dummyCount); output += "    float " + p.name + arr + "[3];"; break;
             case Binding::VEC4:
                 HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
             case Binding::MAT2:
                 HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
             case Binding::MAT3:
-                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    float " + p.name + arr + "[9];"; break;
+                HandleUBOOffset(output, currOffset, 9 * p.count, dummyCount); output += "    float " + p.name + arr + "[9];"; break;
             case Binding::MAT4:
                 HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[16];"; break;
             case Binding::INT:
-                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    int " + p.name + arr + "[1];"; break;
+                HandleUBOOffset(output, currOffset, 1 * p.count, dummyCount); output += "    int " + p.name + arr + "[1];"; break;
             case Binding::IVEC2:
-                HandleUBOOffset(output, currOffset, 2, dummyCount); output += "    int " + p.name + arr + "[2];"; break;
+                HandleUBOOffset(output, currOffset, 2 * p.count, dummyCount); output += "    int " + p.name + arr + "[2];"; break;
             case Binding::IVEC3:
-                HandleUBOOffset(output, currOffset, 3, dummyCount); output += "    int " + p.name + arr + "[3];"; break;
+                HandleUBOOffset(output, currOffset, 3 * p.count, dummyCount); output += "    int " + p.name + arr + "[3];"; break;
             case Binding::IVEC4:
                 HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    int " + p.name + arr + "[4];"; break;
             }
@@ -1234,5 +1235,5 @@ void Shader2Header(std::string baseFolder)
         process.shaders.push_back(def);
     }
     OutputShaderImpl(process, baseFolder);
-    DumpShader(process, baseFolder);
+    OutputShaderHeader(process, baseFolder);
 }
