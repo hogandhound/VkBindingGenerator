@@ -50,13 +50,43 @@ std::string BindingToStride(Binding::BindingEnum e)
         return "16";
     }
 }
+int BindingToStrideI(Binding::BindingEnum e)
+{
+    switch (e)
+    {
+    case Binding::FLOAT:
+        return 4;
+    case Binding::VEC2:
+        return 8;
+    case Binding::VEC3:
+        return 12;
+    case Binding::VEC4:
+        return 16;
+    case Binding::MAT2:
+        return 16;
+    case Binding::MAT3:
+        return 36;
+    case Binding::MAT4:
+        return 64;
+    case Binding::INT:
+        return 4;
+    case Binding::IVEC2:
+        return 8;
+    case Binding::IVEC3:
+        return 12;
+    case Binding::IVEC4:
+        return 16;
+    default:
+        return 16;
+    }
+}
 struct BindingDef
 {
     std::string name;
     int loc, binding;
     std::string offset, stride;
     Binding::BindingEnum type;
-    std::string format;
+    std::string format, rate;
 };
 struct TextureDef
 {
@@ -73,6 +103,8 @@ struct ShaderFragDef
     std::string name;
     std::vector<TextureDef> texs;
     std::vector<UniformDef> ubos;
+    std::string push;
+    std::string pushStages;
 };
 struct ShaderVertDef
 {
@@ -80,19 +112,20 @@ struct ShaderVertDef
     std::vector<BindingDef> inputs;
     std::vector<TextureDef> texs;
     std::vector<UniformDef> ubos;
+    std::string push;
+    std::string pushStages;
 };
 struct ShaderDef
 {
     std::string name;
     ShaderVertDef vert;
     ShaderFragDef frag;
-    std::string push;
-    std::string pushStages;
 };
 struct ShaderStructPart
 {
     Binding::BindingEnum type;
     std::string name;
+    int count;
 };
 struct ShaderStruct
 {
@@ -137,6 +170,15 @@ std::unordered_map<std::string, std::string> ParseStruct(ryml::Tree& doc, Shader
                 {
                     ShaderStructPart part = {};
                     mem["name"] >> part.name;
+                    part.count = 1;
+                    if (mem.has_child("array"))
+                    {
+                        auto arr = mem["array"];
+                        for (int c = 0; c < arr.num_children(); ++c)
+                        {
+                            part.count *= atoi(arr[c].val().data());
+                        }
+                    }
                     if (mem["type"] == "float")
                     {
                         part.type = Binding::FLOAT;
@@ -298,8 +340,8 @@ void ReadVertJson(std::string file, ShaderProcess& process, ShaderDef& shader)
     {
         std::string id;
         doc["push_constants"][0]["type"] >> id;
-        shader.push = structMap[id];
-        shader.pushStages = "VK_SHADER_STAGE_VERTEX_BIT";
+        shader.vert.push = structMap[id];
+        shader.vert.pushStages = "VK_SHADER_STAGE_VERTEX_BIT";
     }
 }
 void ReadFragJson(std::string file, ShaderProcess& process, ShaderDef& shader)
@@ -348,11 +390,8 @@ void ReadFragJson(std::string file, ShaderProcess& process, ShaderDef& shader)
     {
         std::string id;
         doc["push_constants"][0]["type"] >> id;
-        shader.push = structMap[id];
-        if (shader.pushStages.empty())
-            shader.pushStages = "VK_SHADER_STAGE_FRAGMENT_BIT";
-        else
-            shader.pushStages += "| VK_SHADER_STAGE_FRAGMENT_BIT";
+        shader.frag.push = structMap[id];
+        shader.frag.pushStages = "VK_SHADER_STAGE_FRAGMENT_BIT";
     }
 }
 
@@ -403,7 +442,7 @@ std::string GetShaderArray(const std::string& super, std::string name)
     }
     return super + "_" + name;
 }
-std::string GetDrawFunctionName(ShaderProcess& process, ShaderDef& shader, std::vector<std::pair<int, int>>& bindingDescSets, bool drawIndexed)
+std::string GetDrawFunctionName(ShaderProcess& process, ShaderDef& shader, std::vector<std::pair<int, int>>& bindingDescSets, bool drawIndexed, bool instanced)
 {
     bool descSets = shader.frag.texs.size() + shader.frag.ubos.size() + shader.vert.texs.size() + shader.vert.ubos.size() > 0;
     std::string out = "void " + process.name + "_Draw" + shader.name + R"((VKPipelineData * pipeline, VkCommandBuffer command)";
@@ -413,13 +452,26 @@ std::string GetDrawFunctionName(ShaderProcess& process, ShaderDef& shader, std::
         out += ", VkBuffer indexBuffer, uint32_t indexCount, VkIndexType indexType";
     else
         out += ", uint32_t vertexCount";
+    if (instanced)
+        out += ", uint32_t instanceCount";
     for (auto& inp : bindingDescSets)
     {
         out += ", VkBuffer " + shader.vert.inputs[inp.second].name + ", VkDeviceSize offset_" + shader.vert.inputs[inp.second].name;
     }
-    if (!shader.push.empty())
+    if (!shader.vert.push.empty())
     {
-        out += ", " + shader.push + "* push";
+        if (!shader.frag.push.empty() && shader.frag.push.compare(shader.vert.push))
+        {
+            out += ", " + shader.vert.push + "_" + shader.frag.push + "* push";
+        }
+        else
+        {
+            out += ", " + shader.vert.push + "* push";
+        }
+    }
+    else if (!shader.frag.push.empty())
+    {
+        out += ", " + shader.frag.push + "* push";
     }
     out += std::string(")");
     return out;
@@ -493,7 +545,7 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
             out += "    {\n";
             out += "        bindingDescription" + indexStr + ".binding = " + std::to_string(bindingDescIndexes[i].first) + ";\n";
             out += "        bindingDescription" + indexStr + ".stride = " + shader.vert.inputs[bindingDescIndexes[i].second].stride + ";\n";
-            out += "        bindingDescription" + indexStr + ".inputRate = VK_VERTEX_INPUT_RATE_VERTEX;\n";
+            out += "        bindingDescription" + indexStr + ".inputRate = " + shader.vert.inputs[bindingDescIndexes[i].second].rate + ";\n";
             out += "    }\n";
         }
         out += "    VkVertexInputAttributeDescription attributeDescriptions[" + std::to_string(shader.vert.inputs.size()) + "] = {};\n";
@@ -543,12 +595,55 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
     VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
     pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;)";
         }
-        if (shader.push.empty() == false)
+        if (shader.vert.push.empty() == false && shader.frag.push.empty() == false)
+        {
+            if (shader.vert.push.compare(shader.frag.push) == 0)
+            {
+                out += R"(
+    VkPushConstantRange pushConstantRange;
+    pushConstantRange.stageFlags = )" + shader.vert.pushStages + "|" + shader.frag.pushStages + R"(;
+    pushConstantRange.size = sizeof()" + shader.vert.push + R"();
+    pushConstantRange.offset = 0;
+
+    // Push constant ranges are part of the pipeline layout
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;)";
+            }
+            else
+            {
+                out += R"(
+    VkPushConstantRange pushConstantRange[2];
+    pushConstantRange[0].stageFlags = )" + shader.vert.pushStages + R"(;
+    pushConstantRange[0].size = sizeof()" + shader.vert.push + R"();
+    pushConstantRange[0].offset = 0;
+
+    pushConstantRange[1].stageFlags = )" + shader.frag.pushStages + R"(;
+    pushConstantRange[1].size = sizeof()" + shader.frag.push + R"();
+    pushConstantRange[1].offset = offsetof()"+shader.vert.push +"_" + shader.frag.push + R"(, frag);
+
+    // Push constant ranges are part of the pipeline layout
+    pipelineLayoutInfo.pushConstantRangeCount = 2;
+    pipelineLayoutInfo.pPushConstantRanges = pushConstantRange;)";
+            }
+        }
+        else if (shader.vert.push.empty() == false)
         {
             out += R"(
     VkPushConstantRange pushConstantRange;
-    pushConstantRange.stageFlags = )" + shader.pushStages + R"(;
-    pushConstantRange.size = sizeof()" + shader.push + R"();
+    pushConstantRange.stageFlags = )" + shader.vert.pushStages + R"(;
+    pushConstantRange.size = sizeof()" + shader.vert.push + R"();
+    pushConstantRange.offset = 0;
+
+    // Push constant ranges are part of the pipeline layout
+    pipelineLayoutInfo.pushConstantRangeCount = 1;
+    pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;)";
+        }
+        else if (shader.frag.push.empty() == false)
+        {
+            out += R"(
+    VkPushConstantRange pushConstantRange;
+    pushConstantRange.stageFlags = )" + shader.frag.pushStages + R"(;
+    pushConstantRange.size = sizeof()" + shader.frag.push + R"();
     pushConstantRange.offset = 0;
 
     // Push constant ranges are part of the pipeline layout
@@ -706,11 +801,20 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
     {
         bool descSets = shader.frag.texs.size() + shader.frag.ubos.size() + shader.vert.texs.size() + shader.vert.ubos.size() > 0;
         auto bindingDescIndexes = GetVertBindings(shader);
+        bool instanced = false;
+        for (auto bdi : bindingDescIndexes)
+        {
+            if (shader.vert.inputs[bdi.second].rate.compare("VK_VERTEX_INPUT_RATE_INSTANCE") == 0)
+            {
+                instanced = true;
+                break;
+            }
+        }
         //Draw Command
         for (int var = 0; var < 2; var++)
         {
             out += "\n\n";
-            out += GetDrawFunctionName(process, shader, bindingDescIndexes, var == 1);
+            out += GetDrawFunctionName(process, shader, bindingDescIndexes, var == 1, instanced);
             out += R"(
 {
     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->graphicsPipeline);
@@ -728,14 +832,58 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
             }
             out += R"( };
 )";
-            if (!shader.push.empty())
+            if (!shader.vert.push.empty() && !shader.frag.push.empty())
+            {
+                if (shader.vert.push.compare(shader.frag.push) == 0)
+                {
+                    out += R"(    vkCmdPushConstants(
+        command,
+        pipeline->pipelineLayout,
+        )" + shader.vert.pushStages + "|" + shader.frag.pushStages + R"(,
+        0,
+        sizeof()" + shader.vert.push + ")" + R"(,
+        push);
+)";
+                }
+                else
+                {
+                    out += R"(    vkCmdPushConstants(
+        command,
+        pipeline->pipelineLayout,
+        )" + shader.vert.pushStages + R"(,
+        0,
+        sizeof()" + shader.vert.push + ")" + R"(,
+        push);
+)";
+                    out += R"(    vkCmdPushConstants(
+        command,
+        pipeline->pipelineLayout,
+        )" + shader.frag.pushStages + R"(,
+        offsetof()" + shader.vert.push +"_"+shader.frag.push + R"(, frag),
+        sizeof()" + shader.frag.push + ")" + R"(,
+        push);
+)";
+                }
+            }
+            else if (!shader.vert.push.empty())
             {
                 out += R"(    vkCmdPushConstants(
         command,
         pipeline->pipelineLayout,
-        )" + shader.pushStages + R"(,
+        )" + shader.vert.pushStages + R"(,
         0,
-        sizeof()" + shader.push + ")" + R"(,
+        sizeof()" + shader.vert.push + ")" + R"(,
+        push);
+)";
+            }
+            else if (!shader.frag.push.empty())
+            {
+                out += R"(    vkCmdPushConstants(
+        command,
+        pipeline->pipelineLayout,
+        )" + shader.frag.pushStages + R"(,
+        0,
+        sizeof()" + shader.frag.push + ")" + R"(,
         push);
 )";
             }
@@ -749,9 +897,18 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
                 out += R"(    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipelineLayout, 0, )" +
                     std::string("static_cast<uint32_t>(sets.size()), sets.data()") +
                     ", 0, nullptr);\n\n";
-            out += std::string(var == 0 ? "    vkCmdDraw(command, vertexCount, 1, 0, 0); " :
-                "    vkCmdDrawIndexed(command, indexCount, 1, 0, 0, 0);")
-            +"\n}";
+            if (instanced)
+            {
+                out += std::string(var == 0 ? "    vkCmdDraw(command, vertexCount, instanceCount, 0, 0); " :
+                    "    vkCmdDrawIndexed(command, indexCount, instanceCount, 0, 0, 0);")
+                    + "\n}";
+            }
+            else
+            {
+                out += std::string(var == 0 ? "    vkCmdDraw(command, vertexCount, 1, 0, 0); " :
+                    "    vkCmdDrawIndexed(command, indexCount, 1, 0, 0, 0);")
+                    + "\n}";
+            }
         }
     }
     //OutputDebugStringA(out.c_str());
@@ -809,41 +966,64 @@ class VkTexture;)";
         int currOffset = 0, dummyCount = 0;
         for (auto& p : s.second.parts)
         {
+            std::string arr = p.count > 1 ? "[" + std::to_string(p.count) + "]" : "";
             switch (p.type)
             {
             case Binding::FLOAT:
-                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    float " + p.name + "[1];"; break;
+                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    float " + p.name + arr + "[1];"; break;
             case Binding::VEC2:
-                HandleUBOOffset(output, currOffset, 2, dummyCount); output += "    float " + p.name + "[2];"; break;
+                HandleUBOOffset(output, currOffset, 2, dummyCount); output += "    float " + p.name + arr + "[2];"; break;
             case Binding::VEC3:
-                HandleUBOOffset(output, currOffset, 3, dummyCount); output += "    float " + p.name + "[3];"; break;
+                HandleUBOOffset(output, currOffset, 3, dummyCount); output += "    float " + p.name + arr + "[3];"; break;
             case Binding::VEC4:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + "[4];"; break;
+                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
             case Binding::MAT2:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + "[4];"; break;
+                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
             case Binding::MAT3:
-                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    float " + p.name + "[9];"; break;
+                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    float " + p.name + arr + "[9];"; break;
             case Binding::MAT4:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + "[16];"; break;
+                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[16];"; break;
             case Binding::INT:
-                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    int " + p.name + "[1];"; break;
+                HandleUBOOffset(output, currOffset, 1, dummyCount); output += "    int " + p.name + arr + "[1];"; break;
             case Binding::IVEC2:
-                HandleUBOOffset(output, currOffset, 2, dummyCount); output += "    int " + p.name + "[2];"; break;
+                HandleUBOOffset(output, currOffset, 2, dummyCount); output += "    int " + p.name + arr + "[2];"; break;
             case Binding::IVEC3:
-                HandleUBOOffset(output, currOffset, 3, dummyCount); output += "    int " + p.name + "[3];"; break;
+                HandleUBOOffset(output, currOffset, 3, dummyCount); output += "    int " + p.name + arr + "[3];"; break;
             case Binding::IVEC4:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    int " + p.name + "[4];"; break;
+                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    int " + p.name + arr + "[4];"; break;
             }
             output += "\n";
         }
         output += "};\n";
     }
+    for (auto& p : process.shaders)
+    {
+        if (!p.vert.push.empty() && !p.frag.push.empty() && p.vert.push.compare(p.frag.push) != 0)
+        {
+            std::string comb = p.vert.push +"_"+p.frag.push;
+            if (process.structs.find(comb) == process.structs.end())
+            {
+                process.structs[comb] = {};
+                output += "struct " + p.vert.push + "_" + p.frag.push + " { ";
+                output += p.vert.push + " vert; " + p.frag.push + " frag; };\n";
+            }
+        }
+    }
 
     for (auto& p : process.shaders)
     {
         auto bindingIndexes = GetVertBindings(p);
+        bool instanced = false;
+        for (auto bdi : bindingIndexes)
+        {
+            if (p.vert.inputs[bdi.second].rate.compare("VK_VERTEX_INPUT_RATE_INSTANCE") == 0)
+            {
+                instanced = true;
+                break;
+            }
+        }
         for (int var = 0; var < 2; ++var)
-            output += GetDrawFunctionName(process, p, bindingIndexes, var == 0) + ";\n";
+            output += GetDrawFunctionName(process, p, bindingIndexes, var == 0, instanced) + ";\n";
         std::vector<StagesDef<TextureDef>> texs = BuildStages(p.vert.texs, p.frag.texs);
         std::vector<StagesDef<UniformDef>> ubos = BuildStages(p.vert.ubos, p.frag.ubos);
         if (texs.size() + ubos.size() > 0)
@@ -982,7 +1162,7 @@ void Shader2Header(std::string baseFolder)
             def.vert.name = vertFile;
             ReadVertJson(baseFolder + vertFile, process, def);
             auto inputs = yshader["vert"]["inputs"];
-            for (const auto& yvert : yshader["vert"]["inputs"].cchildren())
+            for (const auto& yvert : inputs.cchildren())
             {
                 for (auto& input : def.vert.inputs)
                 {
@@ -1000,11 +1180,50 @@ void Shader2Header(std::string baseFolder)
                             yvert["binding"] >> input.binding;
                         else
                             input.binding = 0;
+                        if (yvert.has_child("rate"))
+                        {
+                            yvert["rate"] >> input.rate;
+
+                            std::transform(input.rate.begin(), input.rate.end(), input.rate.begin(),
+                                [](unsigned char c) { return std::tolower(c); });
+
+                            input.rate = input.rate.find("instance") != std::string::npos 
+                                ? "VK_VERTEX_INPUT_RATE_INSTANCE" : "VK_VERTEX_INPUT_RATE_VERTEX";
+                        }
+                        else
+                        {
+                            input.rate = "VK_VERTEX_INPUT_RATE_VERTEX";
+                        }
                         if (yvert.has_child("format"))
                         {
                             yvert["format"] >> input.format;
                         }
                     }
+                }
+            }
+            if (inputs.num_children() == 0)
+            {
+                int valueCount = 0;
+                std::vector<int> sizeOf;
+                sizeOf.resize(def.vert.inputs.size());
+                for (auto& input : def.vert.inputs)
+                {
+                    if (sizeOf.size() <= input.loc)
+                        sizeOf.resize(input.loc + 1);
+                    sizeOf[input.loc] = BindingToStrideI(input.type) / 4;
+                    valueCount += sizeOf[input.loc];
+                }
+                for (auto& input : def.vert.inputs)
+                {
+                    int offset = 0;
+                    for (int oi = 0; oi < input.loc; ++oi)
+                    {
+                        offset += sizeOf[oi];
+                    }
+                    input.stride = "sizeof(float) * " + std::to_string(valueCount);
+                    input.offset = "sizeof(float) * " + std::to_string(offset);
+                    input.rate = "VK_VERTEX_INPUT_RATE_VERTEX";
+                    input.binding = 0;
                 }
             }
             std::string fragFile;
