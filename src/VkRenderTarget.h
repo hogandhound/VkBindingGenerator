@@ -28,6 +28,8 @@ enum VkDescFormat
     VkDS_U,
     VkDS_TU,
     VkDS_TTU,
+    VkDS_TTTU,
+    VkDS_TTTTU,
     VkDS_UU,
     VkDS_TUU,
     VkDS_TTUU,
@@ -45,6 +47,72 @@ struct VkDescSetCol
     std::vector<VkDescSetSubType> subs[VkDS_MaxType];
 };
 
+namespace VK
+{
+    enum BufferType
+    {
+        UNKNOWN,
+        TRANSFER,
+        UNIFORM,
+        VERTEX,
+        INDEX
+    };
+    struct Buffer
+    {
+        VkBuffer buffer;
+        VmaAllocation allocation;
+
+        BufferType type;
+    };
+    struct Texture
+    {
+        VkImage image;
+        VkImageView imageView;
+        VmaAllocation allocation;
+        VkSampler sampler;
+    };
+    enum TexFlags
+    {
+        TexNearest = 0x01,
+        TexLinear = 0x02,
+        TexClamp = 0x10,
+        TexRepeat = 0x20,
+    };
+    struct FrameBuffer
+    {
+        VkExtent2D extent;
+        VK::Texture image;
+        VK::Texture depth;
+        VkFramebuffer fbo;
+    };
+    struct SingleFrameResources
+    {
+        std::vector<VK::Buffer> buffers;
+        std::vector<VK::Texture> textures;
+        std::vector<VK::FrameBuffer> fbos;
+        uint32_t bufferIndex = 0, textureIndex = 0, fboIndex = 0;
+    };
+}
+
+class VkRenderTarget;
+struct MemoryPool
+{
+    VkRenderTarget* target;
+    std::vector<std::vector<VK::Buffer>> stashed;
+    VmaPool pool;
+    VkBufferUsageFlags usage;
+    VK::BufferType type;
+
+    void init(VkRenderTarget* target, VK::BufferType type);
+    VK::Buffer alloc(void* memory, size_t size);
+    void free(VK::Buffer buffer);
+    size_t PoolIndex(size_t);
+};
+struct MemoryPools
+{
+    MemoryPool transfer, vertex, index, uniform;
+};
+
 class VkRenderTarget
 {
 public:
@@ -55,23 +123,25 @@ public:
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device;
     VmaAllocator allocator;
+    MemoryPools vmaPools_;
 
     VkQueue graphicsQueue;
     VkQueue presentQueue;
 
     VkSwapchainKHR swapChain;
-    std::vector<VkImage> swapChainImages;
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
-    std::vector<VkImageView> swapChainImageViews;
-    std::vector<VkFramebuffer> swapChainFramebuffers;
+    std::vector<VK::FrameBuffer> swapChainFBOs;
 
     VkCommandPool commandPool;
-    VkCommandBuffer temporaryCommandBuffer;
     VkCommandBuffer mainCommandBuffers[COMMAND_BUFFER_COUNT];
+    VkCommandBuffer fboCmd;
     VkCommandBuffer currentCmd;
+    VK::Texture currentImage;
+    VkCommandBuffer GetUploadCmd() { return uploadCommandBuffer[currUpload_]; }
     
     VkRenderPass renderPass;
+    VkRenderPass fboPass;
 
     std::vector<VkSemaphore> imageAvailableSemaphores;
     std::vector<VkSemaphore> renderFinishedSemaphores;
@@ -81,20 +151,34 @@ public:
     VkDescriptorPool descPools[VkDS_MaxType];
     size_t currentFrame = -1;
 
+    std::vector<VK::SingleFrameResources> singleFrame;
+
     void InitVulkan(void* window);
 
-    void BeginSingleTimeCommands();
-    void EndSingleTimeCommands();
+    void BeginUploadCommands();
+    void PushUploads();
 
-    void StartRender();
+    void BeginFramebuffer(VkExtent2D extent, VkFormat imageFormat);
+    void EndFramebuffer();
+
+    void StartRender(VkExtent2D extent = { UINT32_MAX, UINT32_MAX });
     void RecreateSwapChain();
     void EndRender();
     uint32_t getDescSetSubIndex(VkDescFormat fmt, VkDescriptorSetLayoutBinding* bindings, int bCount);
     VkDescriptorSet getDescSet(VkDescFormat fmt, uint32_t subIndex, VkDescriptorSetLayout* layout);
-
+    void PushSingleFrameBuffer(VK::Buffer staging);
 private:
+    SwapChainSupportDetails swapChainSupport_;
     uint32_t imageIndex;
-
+    bool uploadStarted_ = false;
+    int currUpload_ = 0;
+    VkCommandBuffer uploadCommandBuffer[16];
+    void* window_;
+    
+    void destroyTexture(VK::Texture& tex);
+    void destroyFrameBuffer(VK::FrameBuffer& fbo);
+    void cleanupSwapChain();
+    
     bool checkValidationLayerSupport();
     void createInstance(void* window);
     void createSurface(void* window);
@@ -103,6 +187,7 @@ private:
     void createCommandPool();
 
     void createFramebuffers();
+
 
     QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device);
 
@@ -113,6 +198,10 @@ private:
     VkPresentModeKHR chooseSwapPresentMode(const std::vector<VkPresentModeKHR>& availablePresentModes);
 
     VkExtent2D chooseSwapExtent(void* window, const VkSurfaceCapabilitiesKHR& capabilities);
+
+    void createSwapChain(SwapChainSupportDetails swapChainSupport, VkExtent2D extent);
+
+    void createSwapChain(VkExtent2D extent);
 
     void createSwapChain(void* window);
 

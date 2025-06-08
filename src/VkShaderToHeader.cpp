@@ -120,6 +120,7 @@ struct ShaderDef
     std::string name;
     ShaderVertDef vert;
     ShaderFragDef frag;
+    std::string topo, depth;
 };
 struct ShaderStructPart
 {
@@ -445,7 +446,7 @@ std::string GetShaderArray(const std::string& super, std::string name)
 std::string GetDrawFunctionName(ShaderProcess& process, ShaderDef& shader, std::vector<std::pair<int, int>>& bindingDescSets, bool drawIndexed, bool instanced)
 {
     bool descSets = shader.frag.texs.size() + shader.frag.ubos.size() + shader.vert.texs.size() + shader.vert.ubos.size() > 0;
-    std::string out = "void " + process.name + "_Draw" + shader.name + R"((VKPipelineData * pipeline, VkCommandBuffer command)";
+    std::string out = "void " + process.name + "_Draw" + shader.name + "(" + process.name + R"(_Pipeline_Collection& pipeline, VkCommandBuffer command)";
     if (descSets)
         out += ", std::vector<VkDescriptorSet>& sets";
     if (drawIndexed)
@@ -479,14 +480,14 @@ std::string GetDrawFunctionName(ShaderProcess& process, ShaderDef& shader, std::
 std::string GetDescSetFunctionName(ShaderProcess& process, ShaderDef& shader,
     std::vector<StagesDef<UniformDef>>& ubos, std::vector<StagesDef<TextureDef>>& texs)
 {
-    std::string out = "void " + process.name + "_Update" + shader.name + "DescriptorSets(VkRenderTarget * target, VKPipelineData& pipeline, std::vector<VkDescriptorSet>& output";
+    std::string out = "void " + process.name + "_Update" + shader.name + "DescriptorSets(VkRenderTarget * target, "+process.name+"_Pipeline_Collection& pipeline, std::vector<VkDescriptorSet>& output";
     for (auto& def : texs)
     {
-        out += ", VkTexture* texture_" + def.def.name;
+        out += ", VK::Texture* texture_" + def.def.name;
     }
     for (auto& def : ubos)
     {
-        out += ", VkBuffer ubo_" + def.def.name;
+        out += ", VK::Buffer ubo_" + def.def.name;
     }
     out += ")";
     return out;
@@ -568,8 +569,10 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
 
     VkPipelineInputAssemblyStateCreateInfo inputAssembly = {};
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-    inputAssembly.primitiveRestartEnable = VK_FALSE;)z";
+    inputAssembly.topology = )z" + shader.topo + R"z(;
+    inputAssembly.primitiveRestartEnable = )z" + 
+            (shader.topo.compare("VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST") == 0 ? "VK_FALSE" : "VK_TRUE") 
+            + ";";
         //Create Desc Layout
         std::vector<StagesDef<TextureDef>> texs = BuildStages(shader.vert.texs, shader.frag.texs);
         std::vector<StagesDef<UniformDef>> ubos = BuildStages(shader.vert.ubos, shader.frag.ubos);
@@ -619,7 +622,7 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
 
     pushConstantRange[1].stageFlags = )" + shader.frag.pushStages + R"(;
     pushConstantRange[1].size = sizeof()" + shader.frag.push + R"();
-    pushConstantRange[1].offset = offsetof()"+shader.vert.push +"_" + shader.frag.push + R"(, frag);
+    pushConstantRange[1].offset = sizeof()" + shader.vert.push + R"();
 
     // Push constant ranges are part of the pipeline layout
     pipelineLayoutInfo.pushConstantRangeCount = 2;
@@ -649,6 +652,41 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
     // Push constant ranges are part of the pipeline layout
     pipelineLayoutInfo.pushConstantRangeCount = 1;
     pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;)";
+        }
+        out += R"(
+    if (vkCreatePipelineLayout(target->device, &pipelineLayoutInfo, nullptr, &pipeline.pipelineLayout) != VK_SUCCESS) {
+        throw std::runtime_error("failed to create pipeline layout!");
+    }
+
+    VkGraphicsPipelineCreateInfo pipelineInfo = {};)";
+        if (shader.depth.empty() == false)
+        {
+
+            out += R"(
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.minDepthBounds = 0.0f; // Optional
+    depthStencil.maxDepthBounds = 1.0f; // Optional
+    depthStencil.depthCompareOp = )" + shader.depth + R"(;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+)";
+        }
+        else
+        {
+            out += R"(
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable = VK_FALSE;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.minDepthBounds = 0.0f; // Optional
+    depthStencil.maxDepthBounds = 1.0f; // Optional
+    depthStencil.depthCompareOp = VK_COMPARE_OP_NEVER;
+    pipelineInfo.pDepthStencilState = &depthStencil;
+)";
         }
         out += shader_end;
 
@@ -696,7 +734,7 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
 
         //Update Desc Set
 /*
-void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* texture) {
+void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VK::Texture* texture) {
 
     VkDescriptorSet descriptorSet;
     if (++currSet >= descriptorSets.size())
@@ -738,10 +776,12 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
 */
         if (texs.size() + ubos.size() > 0)
         {
+            std::string pipeline = "pipeline.pipelines[PIPELINE_" + process.name + "_" + shader.name + "]";
             out += GetDescSetFunctionName(process, shader, ubos, texs);
             out += " {\n";
 
-            out += "    VkDescriptorSet descriptorSet = target->getDescSet(VkDS_" + dstype + ", pipeline.subIndex, &pipeline.descriptorSetLayout);\n";
+            out += "    VkDescriptorSet descriptorSet = target->getDescSet(VkDS_" + dstype + ", " + pipeline + ".subIndex, &" + pipeline +
+                ".descriptorSetLayout);\n";
             out += "    VkWriteDescriptorSet descriptorWrites[" + std::to_string(texs.size() + ubos.size()) + "] = {};\n\n";
             for (int i = 0; i < texs.size(); ++i)
             {
@@ -763,7 +803,7 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
             {
                 std::string indexStr = "[" + std::to_string(texs.size() + i) + "]";
                 out += "    VkDescriptorBufferInfo bufferInfo_" + ubos[i].def.name + " = {};\n";
-                out += "    bufferInfo_" + ubos[i].def.name + ".buffer = ubo_" + ubos[i].def.name + ";\n";
+                out += "    bufferInfo_" + ubos[i].def.name + ".buffer = ubo_" + ubos[i].def.name + ".buffer;\n";
                 out += "    bufferInfo_" + ubos[i].def.name + ".offset = 0;\n";
                 out += "    bufferInfo_" + ubos[i].def.name + ".range = sizeof(" + ubos[i].def.name + ");\n";
                 out += "    \n";
@@ -810,6 +850,7 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
                 break;
             }
         }
+        std::string pipeline = "pipeline.pipelines[PIPELINE_" + process.name + +"_" + shader.name + "]";
         //Draw Command
         for (int var = 0; var < 2; var++)
         {
@@ -817,18 +858,29 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
             out += GetDrawFunctionName(process, shader, bindingDescIndexes, var == 1, instanced);
             out += R"(
 {
-    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->graphicsPipeline);
+    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, )" + pipeline +
+                R"(.graphicsPipeline);
 
     VkBuffer vertexBuffers[] = { )";
+            for (int bi = 0; bi < bindingDescIndexes.size(); ++bi)
             for (auto& inp : bindingDescIndexes)
             {
-                out += shader.vert.inputs[inp.second].name + ", ";
+                if (bi == inp.first)
+                {
+                    out += shader.vert.inputs[inp.second].name + ", ";
+                    break;
+                }
             }
             out += R"( };
     VkDeviceSize offsets[] = { )";
+            for (int bi = 0; bi < bindingDescIndexes.size(); ++bi)
             for (auto& inp : bindingDescIndexes)
             {
-                out += "offset_" + shader.vert.inputs[inp.second].name + ", ";
+                if (bi == inp.first)
+                {
+                    out += "offset_" + shader.vert.inputs[inp.second].name + ", ";
+                    break;
+                }
             }
             out += R"( };
 )";
@@ -838,7 +890,7 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
                 {
                     out += R"(    vkCmdPushConstants(
         command,
-        pipeline->pipelineLayout,
+        )" + pipeline + R"(.pipelineLayout,
         )" + shader.vert.pushStages + "|" + shader.frag.pushStages + R"(,
         0,
         sizeof()" + shader.vert.push + ")" + R"(,
@@ -849,7 +901,7 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
                 {
                     out += R"(    vkCmdPushConstants(
         command,
-        pipeline->pipelineLayout,
+        )" + pipeline + R"(.pipelineLayout,
         )" + shader.vert.pushStages + R"(,
         0,
         sizeof()" + shader.vert.push + ")" + R"(,
@@ -857,11 +909,11 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
 )";
                     out += R"(    vkCmdPushConstants(
         command,
-        pipeline->pipelineLayout,
+        )" + pipeline + R"(.pipelineLayout,
         )" + shader.frag.pushStages + R"(,
         offsetof()" + shader.vert.push +"_"+shader.frag.push + R"(, frag),
         sizeof()" + shader.frag.push + ")" + R"(,
-        push);
+        &push->frag);
 )";
                 }
             }
@@ -869,7 +921,7 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
             {
                 out += R"(    vkCmdPushConstants(
         command,
-        pipeline->pipelineLayout,
+        )" + pipeline + R"(.pipelineLayout,
         )" + shader.vert.pushStages + R"(,
         0,
         sizeof()" + shader.vert.push + ")" + R"(,
@@ -880,7 +932,7 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
             {
                 out += R"(    vkCmdPushConstants(
         command,
-        pipeline->pipelineLayout,
+        )" + pipeline + R"(.pipelineLayout,
         )" + shader.frag.pushStages + R"(,
         0,
         sizeof()" + shader.frag.push + ")" + R"(,
@@ -894,7 +946,8 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
             if (var == 1)
                 out += "    vkCmdBindIndexBuffer(command, indexBuffer, 0, indexType);\n\n";
             if (descSets)
-                out += R"(    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline->pipelineLayout, 0, )" +
+                out += R"(    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, 
+        )" + pipeline + R"(.pipelineLayout, 0, )" +
                     std::string("static_cast<uint32_t>(sets.size()), sets.data()") +
                     ", 0, nullptr);\n\n";
             if (instanced)
@@ -921,7 +974,6 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VkTexture* 
 
 void HandleUBOOffset(std::string& output, int& currentOffset, int newOffset, int& dummyCount)
 {
-    newOffset = newOffset & 0x3;
     if (currentOffset + newOffset <= 4)
     {
         currentOffset += newOffset;
@@ -931,7 +983,7 @@ void HandleUBOOffset(std::string& output, int& currentOffset, int newOffset, int
     }
     int dummySize = 4 - currentOffset;
     output += "    float dummy" + std::to_string(dummyCount++) + "["+ std::to_string(dummySize) +"];\n";
-    currentOffset = newOffset;
+    currentOffset = newOffset & 0x3;
     if (currentOffset == 4)
         currentOffset = 0;
 }
@@ -947,7 +999,7 @@ void OutputShaderHeader(ShaderProcess& process, std::string baseFolder)
     output += R"(#include <vector>
 #include "VkStructs.h"
 class VkRenderTarget;
-class VkTexture;)";
+namespace VK { class Texture; class Buffer; })";
     output += "\n";
 
     output += "enum " + process.name + "_Pipeline_Entry {\n";
@@ -981,7 +1033,7 @@ class VkTexture;)";
             case Binding::MAT2:
                 HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
             case Binding::MAT3:
-                HandleUBOOffset(output, currOffset, 9 * p.count, dummyCount); output += "    float " + p.name + arr + "[9];"; break;
+                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[12];"; break;
             case Binding::MAT4:
                 HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[16];"; break;
             case Binding::INT:
@@ -995,6 +1047,7 @@ class VkTexture;)";
             }
             output += "\n";
         }
+        HandleUBOOffset(output, currOffset, 4, dummyCount);
         output += "};\n";
     }
     for (auto& p : process.shaders)
@@ -1156,6 +1209,37 @@ void Shader2Header(std::string baseFolder)
     {
         ShaderDef def = {};
         yshader["name"] >> def.name;
+        if (yshader.has_child("topo"))
+        {
+            yshader["topo"] >> def.topo;
+            if (_strcmpi(def.topo.c_str(), "tri") == 0)
+                def.topo = "VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST";
+            else if (_strcmpi(def.topo.c_str(), "triStrip") == 0)
+                def.topo = "VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP";
+            else if (_strcmpi(def.topo.c_str(), "triFan") == 0)
+                def.topo = "VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN";
+        }
+        else
+            def.topo = "VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST";
+        if (yshader.has_child("depth"))
+        {
+            yshader["depth"] >> def.depth;
+
+            if (_strcmpi(def.depth.data(), "less") == 0)
+            {
+                def.depth = "VK_COMPARE_OP_LESS";
+            }
+            else if (_strcmpi(def.depth.data(), "lessEq") == 0) //VK_COMPARE_OP_LESS_OR_EQUAL
+            {
+                def.depth = "VK_COMPARE_OP_LESS_OR_EQUAL";
+            }
+            else if (_strcmpi(def.depth.data(), "never") == 0 || 
+                _strcmpi(def.depth.data(), "none") == 0 || 
+                _strcmpi(def.depth.data(), "VK_COMPARE_OP_NEVER") == 0)
+            {
+                def.depth = "";
+            }
+        }
         if (yshader.has_child("vert"))
         {
             std::string vertFile;
