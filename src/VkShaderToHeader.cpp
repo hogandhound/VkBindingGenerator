@@ -17,7 +17,12 @@ namespace Binding
         INT,
         IVEC2,
         IVEC3,
-        IVEC4
+        IVEC4,
+        UINT,
+        UVEC2,
+        UVEC3,
+        UVEC4,
+        STRUCT
     };
 }
 std::string BindingToStride(Binding::BindingEnum e)
@@ -45,6 +50,14 @@ std::string BindingToStride(Binding::BindingEnum e)
     case Binding::IVEC3:
         return "12";
     case Binding::IVEC4:
+        return "16";
+    case Binding::UINT:
+        return "4";
+    case Binding::UVEC2:
+        return "8";
+    case Binding::UVEC3:
+        return "12";
+    case Binding::UVEC4:
         return "16";
     default:
         return "16";
@@ -75,6 +88,14 @@ int BindingToStrideI(Binding::BindingEnum e)
     case Binding::IVEC3:
         return 12;
     case Binding::IVEC4:
+        return 16;
+    case Binding::UINT:
+        return 4;
+    case Binding::UVEC2:
+        return 8;
+    case Binding::UVEC3:
+        return 12;
+    case Binding::UVEC4:
         return 16;
     default:
         return 16;
@@ -115,16 +136,54 @@ struct ShaderVertDef
     std::string push;
     std::string pushStages;
 };
+struct StencilDef
+{
+    bool active;
+    std::string compareMask,
+        writeMask,
+        reference,
+        compareOp,
+        failOp,
+        depthFailOp,
+        passOp;
+};
+struct BlendDef
+{
+    std::string
+        blendEnable = "VK_TRUE",
+        colorWriteMask = "VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT",
+        srcColorBlendFactor = "VK_BLEND_FACTOR_SRC_ALPHA",
+        dstColorBlendFactor = "VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA",
+        colorBlendOp = "VK_BLEND_OP_ADD",
+        srcAlphaBlendFactor = "VK_BLEND_FACTOR_SRC_ALPHA",
+        dstAlphaBlendFactor = "VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA",
+        alphaBlendOp = "VK_BLEND_OP_ADD";
+};
+
+struct DepthBias
+{
+    bool enabled;
+    std::string depthBiasConstantFactor;
+    std::string depthBiasClamp;
+    std::string depthBiasSlopeFactor;
+};
+
 struct ShaderDef
 {
     std::string name;
     ShaderVertDef vert;
     ShaderFragDef frag;
-    std::string topo, depth;
+    std::string topo, depth, cullMode = "VK_CULL_MODE_NONE", frontFace = "VK_FRONT_FACE_COUNTER_CLOCKWISE";
+    DepthBias depthBias = {};
+    bool depthWrite;
+    std::vector<std::string> dynamicStates;
+    StencilDef stencil;
+    BlendDef blend;
 };
 struct ShaderStructPart
 {
     Binding::BindingEnum type;
+    std::string structName;
     std::string name;
     int count;
 };
@@ -132,6 +191,7 @@ struct ShaderStruct
 {
     std::string name;
     std::vector<ShaderStructPart> parts;
+    int totalStride;
 };
 
 template<class T>
@@ -224,6 +284,34 @@ std::unordered_map<std::string, std::string> ParseStruct(ryml::Tree& doc, Shader
                     {
                         part.type = Binding::IVEC4;
                     }
+                    else if (mem["type"] == "uint")
+                    {
+                        part.type = Binding::UINT;
+                    }
+                    else if (mem["type"] == "uvec2")
+                    {
+                        part.type = Binding::UVEC2;
+                    }
+                    else if (mem["type"] == "uvec3")
+                    {
+                        part.type = Binding::UVEC3;
+                    }
+                    else if (mem["type"] == "uvec4")
+                    {
+                        part.type = Binding::UVEC4;
+                    }
+                    else
+                    {
+                        part.type = Binding::STRUCT;
+                        mem["type"] >> part.structName;
+                        part.structName = fileMapping[part.structName];
+                    }
+                    if (part.type != Binding::STRUCT)
+                        strct.totalStride += BindingToStrideI(part.type) * part.count;
+                    else
+                    {
+                        strct.totalStride += process.structs[part.structName].totalStride* part.count;
+                    }
                     strct.parts.push_back(part);
                 }
                 process.structs[name] = strct;
@@ -310,6 +398,26 @@ void ReadVertJson(std::string file, ShaderProcess& process, ShaderDef& shader)
             input.type = Binding::IVEC4;
             input.format = "VK_FORMAT_R32G32B32A32_SINT";
         }
+        else if (yinput["type"] == "uint")
+        {
+            input.type = Binding::UINT;
+            input.format = "VK_FORMAT_R32_UINT";
+        }
+        else if (yinput["type"] == "uvec2")
+        {
+            input.type = Binding::UVEC2;
+            input.format = "VK_FORMAT_R32G32_UINT";
+        }
+        else if (yinput["type"] == "uvec3")
+        {
+            input.type = Binding::UVEC3;
+            input.format = "VK_FORMAT_R32G32B32_UINT";
+        }
+        else if (yinput["type"] == "uvec4")
+        {
+            input.type = Binding::UVEC4;
+            input.format = "VK_FORMAT_R32G32B32A32_UINT";
+        }
 
         vert.inputs.push_back(input);
     }
@@ -322,7 +430,17 @@ void ReadVertJson(std::string file, ShaderProcess& process, ShaderDef& shader)
             ytex["name"] >> input.name;
             ytex["binding"] >> input.binding;
             ytex["set"] >> input.set;
-            vert.ubos.push_back(input);
+            int i = 0;
+            for (; i < vert.ubos.size(); ++i)
+            {
+                if (vert.ubos[i].binding > input.binding)
+                {
+                    vert.ubos.insert(vert.ubos.begin() + i, input);
+                    break;
+                }
+            }
+            if (i == vert.ubos.size())
+                vert.ubos.push_back(input);
         }
     }
     if (doc.has_child(doc.root_id(), "textures"))
@@ -335,6 +453,17 @@ void ReadVertJson(std::string file, ShaderProcess& process, ShaderDef& shader)
             ytex["binding"] >> input.binding;
             ytex["set"] >> input.set;
             vert.texs.push_back(input);
+            int i = 0;
+            for (; i < vert.texs.size(); ++i)
+            {
+                if (vert.texs[i].binding > input.binding)
+                {
+                    vert.texs.insert(vert.texs.begin() + i, input);
+                    break;
+                }
+            }
+            if (i == vert.texs.size())
+                vert.texs.push_back(input);
         }
     }
     if (doc.has_child(doc.root_id(), "push_constants"))
@@ -446,11 +575,11 @@ std::string GetShaderArray(const std::string& super, std::string name)
 std::string GetDrawFunctionName(ShaderProcess& process, ShaderDef& shader, std::vector<std::pair<int, int>>& bindingDescSets, bool drawIndexed, bool instanced)
 {
     bool descSets = shader.frag.texs.size() + shader.frag.ubos.size() + shader.vert.texs.size() + shader.vert.ubos.size() > 0;
-    std::string out = "void " + process.name + "_Draw" + shader.name + "(" + process.name + R"(_Pipeline_Collection& pipeline, VkCommandBuffer command)";
+    std::string out = "void " + process.name + "_Draw" + shader.name + (drawIndexed ? "" : "_NI") + "(" + process.name + R"(_Pipeline_Collection& pipeline, VkCommandBuffer command)";
     if (descSets)
         out += ", std::vector<VkDescriptorSet>& sets";
     if (drawIndexed)
-        out += ", VkBuffer indexBuffer, uint32_t indexCount, VkIndexType indexType";
+        out += ", VkBuffer indexBuffer, uint32_t indexCount, uint32_t indexOffset, VkIndexType indexType";
     else
         out += ", uint32_t vertexCount";
     if (instanced)
@@ -571,7 +700,9 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
     inputAssembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     inputAssembly.topology = )z" + shader.topo + R"z(;
     inputAssembly.primitiveRestartEnable = )z" + 
-            (shader.topo.compare("VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST") == 0 ? "VK_FALSE" : "VK_TRUE") 
+            ((shader.topo.compare("VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST") == 0 || 
+                (shader.topo.compare("VK_PRIMITIVE_TOPOLOGY_POINT_LIST") == 0))
+                ? "VK_FALSE" : "VK_TRUE") 
             + ";";
         //Create Desc Layout
         std::vector<StagesDef<TextureDef>> texs = BuildStages(shader.vert.texs, shader.frag.texs);
@@ -581,7 +712,41 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
             dstype += "T";
         for (auto& def : ubos)
             dstype += "U";
-        out += shader_mid;
+        out += shader_mid1;
+        out += "VkDynamicState dynamicState[" + std::to_string(2 + shader.dynamicStates.size()) + "] = { VK_DYNAMIC_STATE_VIEWPORT , VK_DYNAMIC_STATE_SCISSOR";
+        for (auto& dyn : shader.dynamicStates)
+        {
+            out += ", " + dyn;
+        }
+        out += shader_mid2;
+
+        out += "    rasterizer.frontFace = " + shader.frontFace + ";\n";
+        out += "    rasterizer.cullMode = " + shader.cullMode + ";\n";
+        if (shader.depthBias.enabled)
+        {
+            /*
+    VkBool32                                   depthBiasEnable;
+    float                                      depthBiasConstantFactor;
+    float                                      depthBiasClamp;
+    float                                      depthBiasSlopeFactor;
+            */
+            out += "    rasterizer.depthBiasEnable = VK_TRUE;\n";
+            if (!shader.depthBias.depthBiasClamp.empty()) out += "    rasterizer.depthBiasClamp = " + shader.depthBias.depthBiasClamp + ";\n";
+            if (!shader.depthBias.depthBiasConstantFactor.empty()) out += "    rasterizer.depthBiasConstantFactor = " + shader.depthBias.depthBiasConstantFactor + ";\n";
+            if (!shader.depthBias.depthBiasSlopeFactor.empty()) out += "    rasterizer.depthBiasSlopeFactor = " + shader.depthBias.depthBiasSlopeFactor + ";\n";
+        }
+
+        out += "    VkPipelineColorBlendAttachmentState colorBlendAttachment = {};\n";
+        out += "    colorBlendAttachment.blendEnable = " + shader.blend.blendEnable + ";\n";
+        out += "    colorBlendAttachment.colorWriteMask = " + shader.blend.colorWriteMask + ";\n";
+        out += "    colorBlendAttachment.srcColorBlendFactor = " + shader.blend.srcColorBlendFactor + ";\n";
+        out += "    colorBlendAttachment.dstColorBlendFactor = " + shader.blend.dstColorBlendFactor + ";\n";
+        out += "    colorBlendAttachment.colorBlendOp = " + shader.blend.colorBlendOp + ";\n";
+        out += "    colorBlendAttachment.srcAlphaBlendFactor = " + shader.blend.srcAlphaBlendFactor + ";\n";
+        out += "    colorBlendAttachment.dstAlphaBlendFactor = " + shader.blend.dstAlphaBlendFactor + ";\n";
+        out += "    colorBlendAttachment.alphaBlendOp = " + shader.blend.alphaBlendOp + ";\n";
+
+        out += shader_mid3;
         if (texs.size() + ubos.size() > 0)
         {
             out += R"(
@@ -666,7 +831,7 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable = VK_TRUE;
-    depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthWriteEnable = )" + std::string(shader.depthWrite ? "VK_TRUE" : "VK_FALSE") + R"(;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.minDepthBounds = 0.0f; // Optional
     depthStencil.maxDepthBounds = 1.0f; // Optional
@@ -687,6 +852,18 @@ void OutputShaderImpl(ShaderProcess& process, std::string baseFolder)
     depthStencil.depthCompareOp = VK_COMPARE_OP_NEVER;
     pipelineInfo.pDepthStencilState = &depthStencil;
 )";
+        }
+        if (shader.stencil.active)
+        {
+            out += "    depthStencil.stencilTestEnable = VK_TRUE;\n";
+            out += "    depthStencil.front.compareMask = " + shader.stencil.compareMask + ";\n";
+            out += "    depthStencil.front.writeMask = " + shader.stencil.writeMask + ";\n";
+            out += "    depthStencil.front.reference = " + shader.stencil.reference + ";\n";
+            out += "    depthStencil.front.compareOp = " + shader.stencil.compareOp + ";\n";
+            out += "    depthStencil.front.failOp = " + shader.stencil.failOp + ";\n";
+            out += "    depthStencil.front.depthFailOp = " + shader.stencil.depthFailOp + ";\n";
+            out += "    depthStencil.front.passOp = " + shader.stencil.passOp + ";\n";
+            out += "    depthStencil.back = depthStencil.front;\n";
         }
         out += shader_end;
 
@@ -953,13 +1130,13 @@ void PipelineImageDraw::UpdateDescriptorSets(VkRenderTarget* target, VK::Texture
             if (instanced)
             {
                 out += std::string(var == 0 ? "    vkCmdDraw(command, vertexCount, instanceCount, 0, 0); " :
-                    "    vkCmdDrawIndexed(command, indexCount, instanceCount, 0, 0, 0);")
+                    "    vkCmdDrawIndexed(command, indexCount, instanceCount, indexOffset, 0, 0);")
                     + "\n}";
             }
             else
             {
                 out += std::string(var == 0 ? "    vkCmdDraw(command, vertexCount, 1, 0, 0); " :
-                    "    vkCmdDrawIndexed(command, indexCount, 1, 0, 0, 0);")
+                    "    vkCmdDrawIndexed(command, indexCount, 1, indexOffset, 0, 0);")
                     + "\n}";
             }
         }
@@ -988,6 +1165,125 @@ void HandleUBOOffset(std::string& output, int& currentOffset, int newOffset, int
         currentOffset = 0;
 }
 
+void AddStructToOutput(std::pair<const std::string, ShaderStruct>& s, std::string& output)
+{
+    output += "struct " + s.second.name + " {\n";
+    int currOffset = 0, dummyCount = 0;
+    for (auto& p : s.second.parts)
+    {
+        std::string arr = p.count > 1 ? "[" + std::to_string(p.count) + "]" : "";
+        switch (p.type)
+        {
+        case Binding::FLOAT:
+            HandleUBOOffset(output, currOffset, 1 * p.count, dummyCount); output += "    float " + p.name + arr + "[1];"; break;
+        case Binding::VEC2:
+            HandleUBOOffset(output, currOffset, 2 * p.count, dummyCount); output += "    float " + p.name + arr + "[2];"; break;
+        case Binding::VEC3:
+            HandleUBOOffset(output, currOffset, 3 * p.count, dummyCount); output += "    float " + p.name + arr + "[3];"; break;
+        case Binding::VEC4:
+            HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
+        case Binding::MAT2:
+            HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
+        case Binding::MAT3:
+            HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[12];"; break;
+        case Binding::MAT4:
+            HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[16];"; break;
+        case Binding::INT:
+            HandleUBOOffset(output, currOffset, 1 * p.count, dummyCount); output += "    int " + p.name + arr + "[1];"; break;
+        case Binding::IVEC2:
+            HandleUBOOffset(output, currOffset, 2 * p.count, dummyCount); output += "    int " + p.name + arr + "[2];"; break;
+        case Binding::IVEC3:
+            HandleUBOOffset(output, currOffset, 3 * p.count, dummyCount); output += "    int " + p.name + arr + "[3];"; break;
+        case Binding::IVEC4:
+            HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    int " + p.name + arr + "[4];"; break;
+        case Binding::UINT:
+            HandleUBOOffset(output, currOffset, 1 * p.count, dummyCount); output += "    uint32_t " + p.name + arr + "[1];"; break;
+        case Binding::UVEC2:
+            HandleUBOOffset(output, currOffset, 2 * p.count, dummyCount); output += "    uint32_t " + p.name + arr + "[2];"; break;
+        case Binding::UVEC3:
+            HandleUBOOffset(output, currOffset, 3 * p.count, dummyCount); output += "    uint32_t " + p.name + arr + "[3];"; break;
+        case Binding::UVEC4:
+            HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    uint32_t " + p.name + arr + "[4];"; break;
+        case Binding::STRUCT:
+        {
+            HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    " + p.structName + " " + p.name + arr + ";"; break;
+            break;
+        }
+        }
+        output += "\n";
+    }
+    HandleUBOOffset(output, currOffset, 4, dummyCount);
+    output += "};\n";
+}
+
+void HandleStructs(ShaderProcess& process, std::string& output)
+{
+    std::unordered_map<std::string, int> addedStructs;
+    std::vector<std::string> toAdd;
+    for (auto& s : process.structs)
+    {
+        if (s.second.parts.size() == 0)
+            continue;
+
+        bool delay = false;
+        for (auto sp : s.second.parts)
+        {
+            if (sp.structName.empty())
+                continue;
+            if (!addedStructs[sp.structName])
+            {
+                delay = true;
+                break;
+            }
+        }
+        if (delay)
+        {
+            toAdd.push_back(s.first);
+            continue;
+        }
+
+        addedStructs[s.first] = 1;
+        AddStructToOutput(s, output);
+    }
+
+    int lastSize = 0;
+    //lastSize check is in case we have an unknown sturct. The code should continue.
+    while (!toAdd.empty() && lastSize != toAdd.size())
+    {
+        lastSize = toAdd.size();
+        
+        for (int i = toAdd.size() - 1; i >= 0; --i)
+        {
+            auto& str = toAdd[i];
+            auto& s = *process.structs.find(str);
+
+            bool delay = false;
+            for (auto sp : s.second.parts)
+            {
+                if (sp.structName.empty())
+                    continue;
+                if (!addedStructs[sp.structName])
+                {
+                    delay = true;
+                    break;
+                }
+            }
+            if (delay)
+                continue;
+
+            addedStructs[s.first] = 1;
+            AddStructToOutput(s, output);
+            toAdd.erase(toAdd.begin() + i);
+        }
+    }
+    //Fallback to just adding the structs we couldn't figure out
+    for (auto& str : toAdd)
+    {
+        auto& s = *process.structs.find(str);
+        AddStructToOutput(s, output);
+    }
+}
+
 void OutputShaderHeader(ShaderProcess& process, std::string baseFolder)
 {
     //std::string baseFolder = "shaders\\";
@@ -999,7 +1295,7 @@ void OutputShaderHeader(ShaderProcess& process, std::string baseFolder)
     output += R"(#include <vector>
 #include "VkStructs.h"
 class VkRenderTarget;
-namespace VK { class Texture; class Buffer; })";
+namespace VK { struct Texture; struct Buffer; })";
     output += "\n";
 
     output += "enum " + process.name + "_Pipeline_Entry {\n";
@@ -1013,43 +1309,7 @@ namespace VK { class Texture; class Buffer; })";
         "    VKPipelineData pipelines[PIPELINE_" + process.name + "_MAX];\n"
         "};\n";
 
-    for (auto& s : process.structs)
-    {
-        output += "struct " + s.second.name + " {\n";
-        int currOffset = 0, dummyCount = 0;
-        for (auto& p : s.second.parts)
-        {
-            std::string arr = p.count > 1 ? "[" + std::to_string(p.count) + "]" : "";
-            switch (p.type)
-            {
-            case Binding::FLOAT:
-                HandleUBOOffset(output, currOffset, 1 * p.count, dummyCount); output += "    float " + p.name + arr + "[1];"; break;
-            case Binding::VEC2:
-                HandleUBOOffset(output, currOffset, 2 * p.count, dummyCount); output += "    float " + p.name + arr + "[2];"; break;
-            case Binding::VEC3:
-                HandleUBOOffset(output, currOffset, 3 * p.count, dummyCount); output += "    float " + p.name + arr + "[3];"; break;
-            case Binding::VEC4:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
-            case Binding::MAT2:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[4];"; break;
-            case Binding::MAT3:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[12];"; break;
-            case Binding::MAT4:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    float " + p.name + arr + "[16];"; break;
-            case Binding::INT:
-                HandleUBOOffset(output, currOffset, 1 * p.count, dummyCount); output += "    int " + p.name + arr + "[1];"; break;
-            case Binding::IVEC2:
-                HandleUBOOffset(output, currOffset, 2 * p.count, dummyCount); output += "    int " + p.name + arr + "[2];"; break;
-            case Binding::IVEC3:
-                HandleUBOOffset(output, currOffset, 3 * p.count, dummyCount); output += "    int " + p.name + arr + "[3];"; break;
-            case Binding::IVEC4:
-                HandleUBOOffset(output, currOffset, 4, dummyCount); output += "    int " + p.name + arr + "[4];"; break;
-            }
-            output += "\n";
-        }
-        HandleUBOOffset(output, currOffset, 4, dummyCount);
-        output += "};\n";
-    }
+    HandleStructs(process, output);
     for (auto& p : process.shaders)
     {
         if (!p.vert.push.empty() && !p.frag.push.empty() && p.vert.push.compare(p.frag.push) != 0)
@@ -1209,6 +1469,60 @@ void Shader2Header(std::string baseFolder)
     {
         ShaderDef def = {};
         yshader["name"] >> def.name;
+        if (yshader.has_child("dynamic"))
+        {
+            for (const auto& d : yshader["dynamic"])
+            {
+                std::string dyn;
+                d >> dyn;
+                def.dynamicStates.push_back(dyn);
+            }
+        }
+        if (yshader.has_child("stencil"))
+        {
+            def.stencil.active = true;
+            const auto& sten = yshader["stencil"];
+            if (sten.has_child("compareMask"))
+                sten["compareMask"] >> def.stencil.compareMask;
+            else
+                def.stencil.compareMask = "0xffffffff";
+            if (sten.has_child("writeMask"))
+                sten["writeMask"] >> def.stencil.writeMask;
+            else
+                def.stencil.writeMask = "0xffffffff";
+            if (sten.has_child("reference"))
+                sten["reference"] >> def.stencil.reference;
+            else
+                def.stencil.reference = "1";
+            if (sten.has_child("compareOp"))
+                sten["compareOp"] >> def.stencil.compareOp;
+            else
+                def.stencil.compareOp = "VK_COMPARE_OP_LESS_OR_EQUAL";
+            if (sten.has_child("failOp"))
+                sten["failOp"] >> def.stencil.failOp;
+            else
+                def.stencil.failOp = "VK_STENCIL_OP_KEEP";
+            if (sten.has_child("depthFailOp"))
+                sten["depthFailOp"] >> def.stencil.depthFailOp;
+            else
+                def.stencil.depthFailOp = "VK_STENCIL_OP_KEEP";
+            if (sten.has_child("passOp"))
+                sten["passOp"] >> def.stencil.passOp;
+            else
+                def.stencil.passOp = "VK_STENCIL_OP_REPLACE";
+        }
+        if (yshader.has_child("blend"))
+        {
+            const auto& blend = yshader["blend"];
+            if (blend.has_child("blendEnable")) blend["blendEnable"] >> def.blend.blendEnable;
+            if (blend.has_child("colorWriteMask")) blend["colorWriteMask"] >> def.blend.colorWriteMask;
+            if (blend.has_child("srcColorBlendFactor")) blend["srcColorBlendFactor"] >> def.blend.srcColorBlendFactor;
+            if (blend.has_child("dstColorBlendFactor")) blend["dstColorBlendFactor"] >> def.blend.dstColorBlendFactor;
+            if (blend.has_child("colorBlendOp")) blend["colorBlendOp"] >> def.blend.colorBlendOp;
+            if (blend.has_child("srcAlphaBlendFactor")) blend["srcAlphaBlendFactor"] >> def.blend.srcAlphaBlendFactor;
+            if (blend.has_child("dstAlphaBlendFactor")) blend["dstAlphaBlendFactor"] >> def.blend.dstAlphaBlendFactor;
+            if (blend.has_child("alphaBlendOp")) blend["alphaBlendOp"] >> def.blend.alphaBlendOp;
+        }
         if (yshader.has_child("topo"))
         {
             yshader["topo"] >> def.topo;
@@ -1224,6 +1538,14 @@ void Shader2Header(std::string baseFolder)
         if (yshader.has_child("depth"))
         {
             yshader["depth"] >> def.depth;
+            def.depthWrite = true;
+            if (yshader.has_child("depthWrite"))
+            {
+                std::string dpWr;
+                yshader["depthWrite"] >> dpWr;
+                if (_strcmpi(dpWr.data(), "VK_FALSE") == 0 || _strcmpi(dpWr.data(), "false") == 0 || _strcmpi(dpWr.data(), "0") == 0)
+                    def.depthWrite = false;
+            }
 
             if (_strcmpi(def.depth.data(), "less") == 0)
             {
@@ -1239,6 +1561,24 @@ void Shader2Header(std::string baseFolder)
             {
                 def.depth = "";
             }
+        }
+        //cullMode = "VK_CULL_MODE_NONE", frontFace = "VK_FRONT_FACE_COUNTER_CLOCKWISE";
+        if (yshader.has_child("cullMode"))
+            yshader["cullMode"] >> def.cullMode;
+        if (yshader.has_child("frontFace"))
+            yshader["frontFace"] >> def.frontFace;
+        if (yshader.has_child("depthBias"))
+        {
+            const auto& db = yshader["depthBias"];
+            def.depthBias.enabled = true;
+            if (db.has_child("depthBiasConstantFactor"))
+                db["depthBiasConstantFactor"] >> def.depthBias.depthBiasConstantFactor;
+            if (db.has_child("depthBiasClamp"))
+                db["depthBiasClamp"] >> def.depthBias.depthBiasClamp;
+            else
+                def.depthBias.depthBiasClamp = "-1.0";
+            if (db.has_child("depthBiasSlopeFactor"))
+                db["depthBiasSlopeFactor"] >> def.depthBias.depthBiasSlopeFactor;
         }
         if (yshader.has_child("vert"))
         {
