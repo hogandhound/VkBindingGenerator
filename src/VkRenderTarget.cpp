@@ -1,9 +1,13 @@
 #define VMA_IMPLEMENTATION
 #include "vk_mem_alloc.h"
+#define NOMINMAX
+#include "windows.h"
+#include "strmif.h"
+#include "vulkan/vulkan.h"
+#include "vulkan/vulkan_win32.h"
+#include "libloaderapi.h"
 
 #include "VkRenderTarget.h"
-#include "SDL.h"
-#include "SDL_vulkan.h"
 #include <VkTexture.h>
 
 #include <thread>
@@ -20,7 +24,10 @@ const std::vector<const char*> validationLayers = {
 };
 
 const std::vector<const char*> deviceExtensions = {
-	VK_KHR_SWAPCHAIN_EXTENSION_NAME
+	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#ifdef USE_DYNAMIC_COLOR
+	VK_EXT_EXTENDED_DYNAMIC_STATE_3_EXTENSION_NAME,
+#endif
 };
 bool VK_KHR_get_memory_requirements2_enabled = false;
 bool VK_KHR_get_physical_device_properties2_enabled = false;
@@ -37,7 +44,13 @@ bool g_BufferDeviceAddressEnabled = false;
 #ifdef NDEBUG
 const bool enableValidationLayers = false;
 #else
-const bool enableValidationLayers = true;
+const bool enableValidationLayers = false;// true;
+#endif
+
+
+#ifdef USE_DYNAMIC_COLOR
+/* Put this in a single .cpp file that's vulkan related: */
+PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT_ = nullptr;
 #endif
 
 void VkRenderTarget::InitVulkan(void* window)
@@ -80,10 +93,10 @@ void VkRenderTarget::BeginFramebuffer(VkExtent2D extent, VkFormat imageFormat)
 	}
 	VK::FrameBuffer& fbo = sfr.fbos[sfr.fboIndex++];
 
-	VK::CreateTexture(this, fbo.image, extent.width, extent.height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, imageFormat);
+	VK::CreateTexture(this, fbo.image, extent.width, extent.height, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, {}, imageFormat);
 	fbo.image.imageView = createImageView(fbo.image.image, imageFormat);
-	VK::CreateTexture(this, fbo.depth, extent.width, extent.height, (uint32_t)0, 0, VK_FORMAT_D32_SFLOAT);
-	fbo.depth.imageView = createImageView(fbo.depth.image, VK_FORMAT_D32_SFLOAT);
+	VK::CreateTexture(this, fbo.depth, extent.width, extent.height, (uint32_t)0, {}, VK_FORMAT_D24_UNORM_S8_UINT);
+	fbo.depth.imageView = createImageView(fbo.depth.image, VK_FORMAT_D24_UNORM_S8_UINT);
 	
 	VkImageView attachments[] = {
 		fbo.image.imageView, fbo.depth.imageView
@@ -196,6 +209,7 @@ void VkRenderTarget::EndFramebuffer()
 
 void VkRenderTarget::StartRender(VkExtent2D extent)
 {
+	currentFrame = (currentFrame + 1) % COMMAND_BUFFER_COUNT;
 	vkWaitForFences(device, 1, &inFlightFences[currentFrame], VK_TRUE, UINT64_MAX);
 
 	uint32_t lastImage = imageIndex;
@@ -273,7 +287,7 @@ void VkRenderTarget::StartRender(VkExtent2D extent)
 		}
 	}
 	auto& sf = singleFrame[currentFrame];
-	for (int i = 0; i < sf.bufferIndex; ++i)
+	for (uint32_t i = 0; i < sf.bufferIndex; ++i)
 	{
 		switch (sf.buffers[i].type)
 		{
@@ -289,15 +303,19 @@ void VkRenderTarget::StartRender(VkExtent2D extent)
 		case VK::UNIFORM:
 			vmaPools_.uniform.free(sf.buffers[i]);
 			break;
+		default: assert(false);
 		}
 		//vmaDestroyBuffer(allocator, sf.buffers[i].buffer, sf.buffers[i].allocation);
 	}
 	singleFrame[currentFrame].bufferIndex = 0;
-	for (int i = 0; i < sf.fboIndex; ++i)
+	for (uint32_t i = 0; i < sf.fboIndex; ++i)
 	{
-		vkDestroyImageView(device, sf.fbos[i].depth.imageView, 0);
-		vkDestroySampler(device, sf.fbos[i].depth.sampler, 0);
-		vmaDestroyImage(allocator, sf.fbos[i].depth.image, sf.fbos[i].depth.allocation);
+		if (sf.fbos[i].depth.image)
+		{
+			vkDestroyImageView(device, sf.fbos[i].depth.imageView, 0);
+			vkDestroySampler(device, sf.fbos[i].depth.sampler, 0);
+			vmaDestroyImage(allocator, sf.fbos[i].depth.image, sf.fbos[i].depth.allocation);
+		}
 		if (sf.fbos[i].image.image)
 		{
 			vkDestroyImageView(device, sf.fbos[i].image.imageView, 0);
@@ -307,7 +325,7 @@ void VkRenderTarget::StartRender(VkExtent2D extent)
 		vkDestroyFramebuffer(device, sf.fbos[i].fbo, 0);
 	}
 	singleFrame[currentFrame].fboIndex = 0;
-	for (int i = 0; i < sf.textureIndex; ++i)
+	for (uint32_t i = 0; i < sf.textureIndex; ++i)
 	{
 		if (sf.textures[i].image)
 		{
@@ -322,8 +340,6 @@ void VkRenderTarget::StartRender(VkExtent2D extent)
 void VkRenderTarget::EndRender()
 {
 	PushUploads();
-
-	auto start = std::chrono::high_resolution_clock::now();
 
 	vkCmdEndRenderPass(mainCommandBuffers[currentFrame]);
 
@@ -376,7 +392,6 @@ void VkRenderTarget::EndRender()
 		throw std::runtime_error("failed to present swap chain image!");
 	}
 
-	currentFrame = (currentFrame + 1) % COMMAND_BUFFER_COUNT;
 	currentCmd = 0;
 }
 
@@ -407,10 +422,38 @@ VkDescriptorSet VkRenderTarget::getDescSet(VkDescFormat fmt, uint32_t subIndex, 
 
 void VkRenderTarget::PushSingleFrameBuffer(VK::Buffer staging)
 {
+	if (!staging.buffer && !staging.allocation)
+		return;
+	if (singleFrame.empty())
+	{
+		vmaDestroyBuffer(allocator, staging.buffer, staging.allocation);
+	}
 	if (singleFrame[currentFrame].buffers.size() <= singleFrame[currentFrame].bufferIndex)
 		singleFrame[currentFrame].buffers.resize(singleFrame[currentFrame].bufferIndex + 1);
 	singleFrame[currentFrame].buffers[singleFrame[currentFrame].bufferIndex] = staging;
 	singleFrame[currentFrame].bufferIndex++;
+}
+
+#if _DEBUG
+void VkRenderTarget::PushSingleTexture_(VK::Texture staging , const char* end, int line)
+#else
+void VkRenderTarget::PushSingleTexture(VK::Texture staging)
+#endif
+{
+#if _DEBUG
+	staging.end = end;
+	staging.line = line;
+#endif
+	if (singleFrame.empty())
+	{
+		vmaDestroyImage(allocator, staging.image, staging.allocation);
+		vkDestroyImageView(device, staging.imageView, 0);
+		vkDestroySampler(device, staging.sampler, 0);
+	}
+	if (singleFrame[currentFrame].textures.size() <= singleFrame[currentFrame].textureIndex)
+		singleFrame[currentFrame].textures.resize(singleFrame[currentFrame].textureIndex + 1);
+	singleFrame[currentFrame].textures[singleFrame[currentFrame].textureIndex] = staging;
+	singleFrame[currentFrame].textureIndex++;
 }
 
 uint32_t VkRenderTarget::getDescSetSubIndex(VkDescFormat fmt, VkDescriptorSetLayoutBinding* bindings, int bCount)
@@ -638,20 +681,30 @@ void VkRenderTarget::createInstance(void* window) {
 	if (vkCreateInstance(&createInfo, nullptr, &instance) != VK_SUCCESS) {
 		assert(0);
 	}
+
+#ifdef USE_DYNAMIC_COLOR
+	/* Put this in your code that initializes Vulkan (after you create your VkInstance and VkDevice): */
+	vkCmdSetColorWriteMaskEXT_ = (PFN_vkCmdSetColorWriteMaskEXT)vkGetInstanceProcAddr(instance, "vkCmdSetColorWriteMaskEXT"); // It depends on the function whether you want to use vkGetInstanceProcAddr or vkGetDeviceProcAddr
+#endif
 }
 
 void VkRenderTarget::createSurface(void* window)
 {
-
+	VkWin32SurfaceCreateInfoKHR createInfo{};
+	createInfo.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+	createInfo.hwnd = (HWND)window;
+	createInfo.hinstance = GetModuleHandle(nullptr);
 	// now that you have a window and a vulkan instance you need a surface
-	if (!SDL_Vulkan_CreateSurface((SDL_Window*)window, instance, &surface)) {
+	if (vkCreateWin32SurfaceKHR(instance, &createInfo, nullptr, &surface) != VK_SUCCESS) {
 		// failed to create a surface!
 	}
 }
 
 static constexpr uint32_t GetVulkanApiVersion()
 {
-#if VMA_VULKAN_VERSION == 1003000
+#if VMA_VULKAN_VERSION == 1004000
+	return VK_API_VERSION_1_4;
+#elif VMA_VULKAN_VERSION == 1003000
 	return VK_API_VERSION_1_3;
 #elif VMA_VULKAN_VERSION == 1002000
 	return VK_API_VERSION_1_2;
@@ -760,6 +813,12 @@ void VkRenderTarget::createLogicalDevice() {
 	VkPhysicalDeviceSynchronization2Features syncFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES };
 	syncFeatures.synchronization2 = 1;
 
+#ifdef USE_DYNAMIC_COLOR
+	VkPhysicalDeviceExtendedDynamicState3FeaturesEXT dynaFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT };
+	dynaFeatures.extendedDynamicState3ColorWriteMask = 1;
+	syncFeatures.pNext = &dynaFeatures;
+#endif
+
 	VkDeviceCreateInfo createInfo = {};
 	createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
 	createInfo.pNext = &syncFeatures;
@@ -792,7 +851,7 @@ void VkRenderTarget::createLogicalDevice() {
 
 VkSurfaceFormatKHR VkRenderTarget::chooseSwapSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& availableFormats) {
 	for (const auto& availableFormat : availableFormats) {
-		if (availableFormat.format == VK_FORMAT_R8G8B8A8_SRGB && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+		if (availableFormat.format == VK_FORMAT_R8G8B8A8_UNORM && availableFormat.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
 			return availableFormat;
 		}
 	}
@@ -815,12 +874,12 @@ VkExtent2D VkRenderTarget::chooseSwapExtent(void* window, const VkSurfaceCapabil
 		return capabilities.currentExtent;
 	}
 	else {
-		int width, height;
-		SDL_GetWindowSize((SDL_Window*)window, &width, &height);
+		LPRECT rect = {};
+		GetWindowRect((HWND)window, rect);
 
 		VkExtent2D actualExtent = {
-			static_cast<uint32_t>(width),
-			static_cast<uint32_t>(height)
+			static_cast<uint32_t>(rect->right - rect->left),
+			static_cast<uint32_t>(rect->bottom - rect->bottom)
 		};
 
 		actualExtent.width = std::max(capabilities.minImageExtent.width, std::min(capabilities.maxImageExtent.width, actualExtent.width));
@@ -878,10 +937,10 @@ void VkRenderTarget::createSwapChain(SwapChainSupportDetails swapChainSupport, V
 	std::vector<VkImage> images;
 	images.resize(imageCount);
 	vkGetSwapchainImagesKHR(device, swapChain, &imageCount, images.data());
-	for (int i = 0; i < imageCount; ++i)
+	for (uint32_t i = 0; i < imageCount; ++i)
 	{
 		swapChainFBOs[i].image.image = images[i];
-		VK::CreateTexture(this, swapChainFBOs[i].depth, extent.width, extent.height, (uint32_t)0, 0, VK_FORMAT_D32_SFLOAT);
+		VK::CreateTexture(this, swapChainFBOs[i].depth, extent.width, extent.height, (uint32_t)0, {}, VK_FORMAT_D24_UNORM_S8_UINT);
 	}
 
 	swapChainImageFormat = surfaceFormat.format;
@@ -1049,7 +1108,11 @@ bool VkRenderTarget::IsDeviceSuitable(VkPhysicalDevice device) {
 
 	VkPhysicalDeviceFeatures2 supportedFeatures = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
 	VkPhysicalDeviceVulkan13Features vk13 = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
-	supportedFeatures.pNext = &vk13;
+	supportedFeatures.pNext = &vk13; //VK_EXT_extended_dynamic_state3
+#ifdef USE_DYNAMIC_COLOR
+	VkPhysicalDeviceExtendedDynamicState3FeaturesEXT cwExt = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT };
+	vk13.pNext = &cwExt;
+#endif
 	vkGetPhysicalDeviceFeatures2(device, &supportedFeatures);
 
 
@@ -1095,7 +1158,7 @@ VkImageView VkRenderTarget::createImageView(VkImage image, VkFormat format) {
 	viewInfo.image = image;
 	viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
 	viewInfo.format = format;
-	viewInfo.subresourceRange.aspectMask = format == VK_FORMAT_D32_SFLOAT? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
+	viewInfo.subresourceRange.aspectMask = format == VK_FORMAT_D24_UNORM_S8_UINT ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT;
 	viewInfo.subresourceRange.baseMipLevel = 0;
 	viewInfo.subresourceRange.levelCount = 1;
 	viewInfo.subresourceRange.baseArrayLayer = 0;
@@ -1126,6 +1189,19 @@ void VkRenderTarget::createDescPools()
 		case VkDS_UU: texs = 0; ubos = 2; break;
 		case VkDS_TUU: texs = 1; ubos = 2; break;
 		case VkDS_TTUU: texs = 2; ubos = 2; break;
+		case VkDS_TTTUU: texs = 3; ubos = 2; break;
+		case VkDS_TTTTUU: texs = 4; ubos = 2; break;
+		case VkDS_UUU: texs = 0; ubos = 3; break;
+		case VkDS_TUUU: texs = 1; ubos = 3; break;
+		case VkDS_TTUUU: texs = 2; ubos = 3; break;
+		case VkDS_TTTUUU: texs = 3; ubos = 3; break;
+		case VkDS_TTTTUUU: texs = 4; ubos = 3; break;
+		case VkDS_UUUU: texs = 0; ubos = 4; break;
+		case VkDS_TUUUU: texs = 1; ubos = 4; break;
+		case VkDS_TTUUUU: texs = 2; ubos = 4; break;
+		case VkDS_TTTUUUU: texs = 3; ubos = 4; break;
+		case VkDS_TTTTUUUU: texs = 4; ubos = 4; break;
+		case VkDS_TTUUUUU: texs = 2; ubos = 5; break;
 		}
 		VkDescriptorPoolSize poolSizes[8] = {};
 		for (int i = 0; i < texs; ++i)
@@ -1143,7 +1219,7 @@ void VkRenderTarget::createDescPools()
 		poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
 		poolInfo.poolSizeCount = texs+ubos;
 		poolInfo.pPoolSizes = poolSizes;
-		poolInfo.maxSets = 2048;
+		poolInfo.maxSets = 4096;
 
 		if (vkCreateDescriptorPool(device, &poolInfo, nullptr, &descPools[fmt]) != VK_SUCCESS) {
 			throw std::runtime_error("failed to create descriptor pool!");
@@ -1169,7 +1245,7 @@ void VkRenderTarget::createRenderPass() {
 	colorAttachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
 	VkAttachmentDescription depthAttachment{};
-	depthAttachment.format = VK_FORMAT_D32_SFLOAT;
+	depthAttachment.format = VK_FORMAT_D24_UNORM_S8_UINT;
 	depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
 	depthAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
 	depthAttachment.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -1242,11 +1318,12 @@ void VkRenderTarget::createRenderPass() {
 }
 
 std::vector<const char*> VkRenderTarget::getRequiredExtensions(void* window) {
+	std::vector<const char*> extensionNames = {
+		VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME, 
 
-	uint32_t extensionCount;
-	SDL_Vulkan_GetInstanceExtensions((SDL_Window*)window, &extensionCount, nullptr);
-	std::vector<const char*> extensionNames(extensionCount);
-	SDL_Vulkan_GetInstanceExtensions((SDL_Window*)window, &extensionCount, extensionNames.data());
+		//VK_EXT_COLOR_WRITE_ENABLE_EXTENSION_NAME//VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT
+
+	};
 
 	if (enableValidationLayers) {
 		extensionNames.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
@@ -1259,7 +1336,7 @@ uint32_t MemPoolSizes[] = {
 	32, 64, 128, 256, 384, 512, 768, 1024, 1536, 2048, 3072,  4096,1024 * 6, 1024 * 10, 1024 * 16, 1024 * 24, 1024 * 36,1024 * 72,1024 * 128
 };
 uint32_t MemPoolSizeCount = sizeof(MemPoolSizes) / sizeof(uint32_t);
-void MemoryPool::init(VkRenderTarget* target, VK::BufferType type)
+void VK::MemoryPool::init(VkRenderTarget* target, VK::BufferType type)
 {
 	this->target = target;
 	this->type = type;
@@ -1314,9 +1391,9 @@ void MemoryPool::init(VkRenderTarget* target, VK::BufferType type)
 }
 
 
-VK::Buffer MemoryPool::alloc(void* memory, size_t size)
+VK::Buffer VK::MemoryPool::alloc(void* memory, size_t size)
 {
-	uint32_t index = PoolIndex(size);
+	size_t index = PoolIndex(size);
 	if (!stashed[index].empty())
 	{
 		VK::Buffer ret = {};
@@ -1340,7 +1417,7 @@ VK::Buffer MemoryPool::alloc(void* memory, size_t size)
 		}
 		if (ret.buffer != nullptr)
 		{
-			if (usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+			if (usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT && memory)
 			{
 				void* mapped = 0;
 				VkResult mr = vmaMapMemory(target->allocator, ret.allocation, &mapped);
@@ -1351,14 +1428,14 @@ VK::Buffer MemoryPool::alloc(void* memory, size_t size)
 		}
 	}
 
-
+	size_t memoryPoolSize = size;
 	if (index < MemPoolSizeCount)
 	{
-		size = MemPoolSizes[index];
+		memoryPoolSize = MemPoolSizes[index];
 	}
 
 	VkBufferCreateInfo vbInfo = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-	vbInfo.size = size;
+	vbInfo.size = memoryPoolSize;
 	vbInfo.usage = usage;
 	vbInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -1368,8 +1445,8 @@ VK::Buffer MemoryPool::alloc(void* memory, size_t size)
 	VK::Buffer ret = {};
 	ret.type = type;
 	VmaAllocationInfo stagingBufferAllocInfo = {};
-	vmaCreateBuffer(target->allocator, &vbInfo, &vbAllocCreateInfo, &ret.buffer, &ret.allocation, &stagingBufferAllocInfo);
-	if (usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT)
+	VkResult cr = vmaCreateBuffer(target->allocator, &vbInfo, &vbAllocCreateInfo, &ret.buffer, &ret.allocation, &stagingBufferAllocInfo);
+	if (usage & VK_BUFFER_USAGE_TRANSFER_SRC_BIT && memory)
 	{
 		if (stagingBufferAllocInfo.pMappedData)
 			memcpy(stagingBufferAllocInfo.pMappedData, memory, size);
@@ -1384,18 +1461,18 @@ VK::Buffer MemoryPool::alloc(void* memory, size_t size)
 	return ret;
 }
 
-void MemoryPool::free(VK::Buffer buffer)
+void VK::MemoryPool::free(VK::Buffer buffer)
 {
 	if (buffer.allocation == 0)
 	{
 		assert(!buffer.buffer);
 		return;
 	}
-	uint32_t index = PoolIndex(buffer.allocation->GetSize());
+	size_t index = PoolIndex(buffer.allocation->GetSize());
 	stashed[index].push_back(buffer);
 }
 
-size_t MemoryPool::PoolIndex(size_t sz)
+size_t VK::MemoryPool::PoolIndex(size_t sz)
 {
 	if (sz > MemPoolSizes[MemPoolSizeCount - 1])
 		return MemPoolSizeCount;

@@ -15,6 +15,16 @@ struct QueueFamilyIndices {
     }
 };
 
+#ifndef vkCmdSetColorWriteMaskEXT
+#define USE_DYNAMIC_COLOR
+#ifdef USE_DYNAMIC_COLOR
+/* Put this somewhere in a header file and include it alongside (and after) vulkan.h: */
+extern PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT_;
+// This #define lets you call the function the same way as if it was coming from the vulkan.h header
+#define vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT_
+#endif
+#endif
+
 struct SwapChainSupportDetails {
     VkSurfaceCapabilitiesKHR capabilities;
     std::vector<VkSurfaceFormatKHR> formats;
@@ -33,6 +43,19 @@ enum VkDescFormat
     VkDS_UU,
     VkDS_TUU,
     VkDS_TTUU,
+    VkDS_TTTUU,
+    VkDS_TTTTUU,
+    VkDS_UUU,
+    VkDS_TUUU,
+    VkDS_TTUUU,
+    VkDS_TTTUUU,
+    VkDS_TTTTUUU,
+    VkDS_UUUU,
+    VkDS_TUUUU,
+    VkDS_TTUUUU,
+    VkDS_TTTUUUU,
+    VkDS_TTTTUUUU,
+    VkDS_TTUUUUU,
     VkDS_MaxType,
     VkDS_ = VkDS_MaxType, //Dummy Value
 };
@@ -47,6 +70,7 @@ struct VkDescSetCol
     std::vector<VkDescSetSubType> subs[VkDS_MaxType];
 };
 
+class VkRenderTarget;
 namespace VK
 {
     enum BufferType
@@ -64,19 +88,45 @@ namespace VK
 
         BufferType type;
     };
+    struct SamplerSettings
+    {
+        //Sampler Settings
+        uint8_t minF : 1;
+        uint8_t maxF : 1;
+        uint8_t mipF : 1;
+        uint8_t addU : 3;
+        uint8_t addV : 3;
+        bool operator==(SamplerSettings& other)
+        {
+            return minF == other.minF &&
+                maxF == other.maxF &&
+                mipF == other.mipF &&
+                addU == other.addU &&
+                addV == other.addV;
+        }
+        bool operator!=(SamplerSettings& other)
+        {
+            return minF != other.minF ||
+                maxF != other.maxF ||
+                mipF != other.mipF ||
+                addU != other.addU ||
+                addV != other.addV;
+        }
+    };
     struct Texture
     {
         VkImage image;
         VkImageView imageView;
         VmaAllocation allocation;
         VkSampler sampler;
-    };
-    enum TexFlags
-    {
-        TexNearest = 0x01,
-        TexLinear = 0x02,
-        TexClamp = 0x10,
-        TexRepeat = 0x20,
+        VkFormat format;
+        uint16_t width, height;
+        uint8_t mips;
+        SamplerSettings sampSettings;
+#if _DEBUG
+        const char *end = 0;
+        int line = 0;
+#endif
     };
     struct FrameBuffer
     {
@@ -92,26 +142,25 @@ namespace VK
         std::vector<VK::FrameBuffer> fbos;
         uint32_t bufferIndex = 0, textureIndex = 0, fboIndex = 0;
     };
+    struct MemoryPool
+    {
+        VkRenderTarget* target;
+        std::vector<std::vector<VK::Buffer>> stashed;
+        VmaPool pool;
+        VkBufferUsageFlags usage;
+        VK::BufferType type;
+
+        void init(VkRenderTarget* target, VK::BufferType type);
+        VK::Buffer alloc(void* memory, size_t size);
+        void free(VK::Buffer buffer);
+        size_t PoolIndex(size_t);
+    };
+    struct MemoryPools
+    {
+        MemoryPool transfer, vertex, index, uniform;
+    };
 }
 
-class VkRenderTarget;
-struct MemoryPool
-{
-    VkRenderTarget* target;
-    std::vector<std::vector<VK::Buffer>> stashed;
-    VmaPool pool;
-    VkBufferUsageFlags usage;
-    VK::BufferType type;
-
-    void init(VkRenderTarget* target, VK::BufferType type);
-    VK::Buffer alloc(void* memory, size_t size);
-    void free(VK::Buffer buffer);
-    size_t PoolIndex(size_t);
-};
-struct MemoryPools
-{
-    MemoryPool transfer, vertex, index, uniform;
-};
 
 class VkRenderTarget
 {
@@ -123,7 +172,7 @@ public:
     VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
     VkDevice device;
     VmaAllocator allocator;
-    MemoryPools vmaPools_;
+    VK::MemoryPools vmaPools_;
 
     VkQueue graphicsQueue;
     VkQueue presentQueue;
@@ -167,6 +216,14 @@ public:
     uint32_t getDescSetSubIndex(VkDescFormat fmt, VkDescriptorSetLayoutBinding* bindings, int bCount);
     VkDescriptorSet getDescSet(VkDescFormat fmt, uint32_t subIndex, VkDescriptorSetLayout* layout);
     void PushSingleFrameBuffer(VK::Buffer staging);
+#if _DEBUG
+#define PushSingleTexture(A) PushSingleTexture_(A, __FILE__, __LINE__)
+    void PushSingleTexture_(VK::Texture staging
+        , const char* end, int line
+    );
+#else
+    void PushSingleTexture(VK::Texture staging);
+#endif 
 private:
     SwapChainSupportDetails swapChainSupport_;
     uint32_t imageIndex;
