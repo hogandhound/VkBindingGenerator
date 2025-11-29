@@ -184,6 +184,10 @@ void VK::CreateTexture(VkRenderTarget* target, VK::Texture& texture, uint32_t wi
 void VK::CreateTexture(VkRenderTarget* target, VK::Texture& texture, uint32_t width, uint32_t height, uint32_t usage, 
     VK::SamplerSettings settings, VkFormat format)
 {
+    texture.width = width;
+    texture.height = height;
+    texture.mips = 1;
+
     VkDeviceSize imageSize;
     switch (format)
     {

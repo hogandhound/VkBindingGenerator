@@ -5,7 +5,7 @@
 #include "vk_mem_alloc.h"
 #include <vector>
 
-static const uint32_t COMMAND_BUFFER_COUNT = 2;
+static const uint32_t COMMAND_BUFFER_COUNT = 3;
 struct QueueFamilyIndices {
     uint32_t graphicsFamily = 0xFFFFFFFF;
     uint32_t presentFamily = 0xFFFFFFFF;
@@ -23,6 +23,12 @@ extern PFN_vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT_;
 // This #define lets you call the function the same way as if it was coming from the vulkan.h header
 #define vkCmdSetColorWriteMaskEXT vkCmdSetColorWriteMaskEXT_
 #endif
+#endif
+#ifndef vkCmdSetColorBlendEquationEXT
+/* Put this somewhere in a header file and include it alongside (and after) vulkan.h: */
+extern PFN_vkCmdSetColorBlendEquationEXT vkCmdSetColorBlendEquationEXT_;
+// This #define lets you call the function the same way as if it was coming from the vulkan.h header
+#define vkCmdSetColorBlendEquationEXT vkCmdSetColorBlendEquationEXT_
 #endif
 
 struct SwapChainSupportDetails {
@@ -56,6 +62,7 @@ enum VkDescFormat
     VkDS_TTTUUUU,
     VkDS_TTTTUUUU,
     VkDS_TTUUUUU,
+    VkDS_TUUUUU,
     VkDS_MaxType,
     VkDS_ = VkDS_MaxType, //Dummy Value
 };
@@ -180,22 +187,43 @@ public:
     VkSwapchainKHR swapChain;
     VkFormat swapChainImageFormat;
     VkExtent2D swapChainExtent;
-    std::vector<VK::FrameBuffer> swapChainFBOs;
 
     VkCommandPool commandPool;
-    VkCommandBuffer mainCommandBuffers[COMMAND_BUFFER_COUNT];
+    //VkCommandBuffer mainCommandBuffers[COMMAND_BUFFER_COUNT];
     VkCommandBuffer fboCmd;
     VkCommandBuffer currentCmd;
     VK::Texture currentImage;
     VkCommandBuffer GetUploadCmd() { return uploadCommandBuffer[currUpload_]; }
+
+    VkFence fboFence;
     
     VkRenderPass renderPass;
     VkRenderPass fboPass;
 
-    std::vector<VkSemaphore> imageAvailableSemaphores;
-    std::vector<VkSemaphore> renderFinishedSemaphores;
-    std::vector<VkFence> inFlightFences;
-    std::vector<VkFence> imagesInFlight;
+    struct SubmissionResources {
+        VkFence fence;
+        VkSemaphore image_acquired_semaphore;
+        VkCommandBuffer cmd;
+        uint16_t startUpload, countUpload;
+        //VkCommandBuffer graphics_to_present_cmd;
+        //VkBuffer uniform_buffer;
+        //VkDeviceMemory uniform_memory;
+        //void* uniform_memory_ptr = nullptr;
+        //VkDescriptorSet descriptor_set;
+    };
+    SubmissionResources submissionResources[COMMAND_BUFFER_COUNT] = {};
+
+    struct SwapchainImageResources {
+        VK::FrameBuffer framebuffer;
+        VkSemaphore draw_complete_semaphore;
+        //VkSemaphore image_ownership_semaphore;
+    };
+    std::vector<SwapchainImageResources> swapChainFBOs;
+
+    //std::vector<VkSemaphore> imageAvailableSemaphores;
+    //std::vector<VkSemaphore> renderFinishedSemaphores;
+    //std::vector<VkFence> inFlightFences;
+    //std::vector<VkFence> imagesInFlight, imagesInFlightStash;
     VkDescSetCol descSets;
     VkDescriptorPool descPools[VkDS_MaxType];
     size_t currentFrame = -1;
@@ -216,20 +244,15 @@ public:
     uint32_t getDescSetSubIndex(VkDescFormat fmt, VkDescriptorSetLayoutBinding* bindings, int bCount);
     VkDescriptorSet getDescSet(VkDescFormat fmt, uint32_t subIndex, VkDescriptorSetLayout* layout);
     void PushSingleFrameBuffer(VK::Buffer staging);
-#if _DEBUG
-#define PushSingleTexture(A) PushSingleTexture_(A, __FILE__, __LINE__)
-    void PushSingleTexture_(VK::Texture staging
-        , const char* end, int line
-    );
-#else
-    void PushSingleTexture(VK::Texture staging);
-#endif 
+    void PushSingleTexture(VK::Texture& staging);
 private:
     SwapChainSupportDetails swapChainSupport_;
     uint32_t imageIndex;
     bool uploadStarted_ = false;
     int currUpload_ = 0;
-    VkCommandBuffer uploadCommandBuffer[16];
+#define UPLOAD_BUFFER_COUNT 16
+    VkCommandBuffer uploadCommandBuffer[UPLOAD_BUFFER_COUNT];
+    VkFence uploadFences[UPLOAD_BUFFER_COUNT];
     void* window_;
     
     void destroyTexture(VK::Texture& tex);
